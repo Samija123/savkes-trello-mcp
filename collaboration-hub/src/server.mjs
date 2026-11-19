@@ -1,8 +1,10 @@
+import { installPhase4 } from './phase4.mjs';
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { splitTrelloCard } from './trello-split.mjs';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const PORT = Number(process.env.PORT || 8787);
@@ -27,6 +29,9 @@ function purgeExpired() {
 const HOST = process.env.HOST || '127.0.0.1'; // local-only demo; do not expose without authentication
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
 const participants = new Map(); // websocket -> { name, role, cardId, joinedAt }
+const collaborationRequests = new Map(); // requestId -> pending/approved/declined/split
+const workSplits = new Map(); // cardId -> { owner, collaborator, ownerWork, collaboratorWork, ... }
+let requestSequence = 0;
 const claims = new Map(); // cardId -> { owner, claimedAt }
 const events = [];
 const fieldClaims = new Map(); // cardId:field -> { owner, claimedAt }
@@ -170,7 +175,7 @@ const server = http.createServer(async (req, res) => {
       // Capture current field state as version snapshot
       const snapshot = {};
       for (const [key, claim] of fieldClaims.entries()) {
-        if (key.startswith(cardId + ":")) {
+        if (key.startsWith(cardId + ":")) {
           const field = key.slice(cardId.length + 1);
           snapshot[field] = "claimed";
         }
@@ -231,7 +236,10 @@ const server = http.createServer(async (req, res) => {
     res.end(html);
   } catch { res.writeHead(500); res.end('Dashboard unavailable'); }
 });
-const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16 * 1024 });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+server.on('upgrade', (req, socket, head) => {
+  if (req.url === '/ws') wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+});
 function json(res, data) {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
@@ -239,6 +247,8 @@ function json(res, data) {
 function snapshot() {
   return {
     participants: [...participants.values()],
+    collaborationRequests: [...collaborationRequests.values()],
+    workSplits: [...workSplits.values()],
     claims: [...claims.entries()].map(([cardId, claim]) => ({ cardId, ...claim })),
     fieldClaims: [...fieldClaims.entries()].map(([key, claim]) => ({ key, ...claim })),
     dependencies: [...dependencies.entries()].map(([cardId, needs]) => ({ cardId, needs: [...needs] })),
@@ -260,12 +270,12 @@ function clean(value, max = 80) {
 }
 wss.on('connection', (ws) => {
   send(ws, { type: 'state', state: snapshot() });
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { type: 'error', message: 'Invalid JSON' }); }
     const actor = participants.get(ws);
     if (msg.type === 'join') {
-      const name = clean(msg.name, 40);
+      const name = clean(msg.name || msg.developerId, 40);
       const role = msg.role || 'developer';
       if (!name) return send(ws, { type: 'error', message: 'Name required' });
       if ([...participants.entries()].some(([socket, person]) => socket !== ws && person.name === name)) return send(ws, { type: 'error', message: 'This name is already connected; choose a different name' });
@@ -289,9 +299,65 @@ wss.on('connection', (ws) => {
         actor.cardId = cardId;
         publish('claimed', `${actor.name} claimed ${cardId}`);
       }
+
+    } else if (msg.type === 'request-collaboration') {
+      if (!cardId) return send(ws, { type: 'error', message: 'Card ID required' });
+      const owner = claims.get(cardId)?.owner;
+      if (!owner) return send(ws, { type: 'error', message: 'Card must be claimed first' });
+      if (owner === actor.name) return send(ws, { type: 'error', message: 'You already own this card' });
+      const existing = [...collaborationRequests.values()].find(r => r.cardId === cardId && r.requester === actor.name && r.status === 'pending');
+      if (existing) return send(ws, { type: 'error', message: 'Request already pending' });
+      const request = { id: ++requestSequence, cardId, owner, requester: actor.name, note: clean(msg.note, 200), status: 'pending', createdAt: new Date().toISOString() };
+      collaborationRequests.set(request.id, request);
+      publish('collaboration-request', `${actor.name} requested to collaborate with ${owner} on ${cardId}`);
+    } else if (msg.type === 'respond-collaboration') {
+      const request = collaborationRequests.get(Number(msg.requestId));
+      if (!request || request.status !== 'pending') return send(ws, { type: 'error', message: 'Pending request not found' });
+      if (request.owner !== actor.name || claims.get(request.cardId)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only the current card owner can respond' });
+      if (!['approved', 'declined', 'split'].includes(msg.decision)) return send(ws, { type: 'error', message: 'Invalid decision' });
+      if (msg.decision === 'split') {
+        const ownerWork = clean(msg.ownerWork, 160);
+        const collaboratorWork = clean(msg.collaboratorWork, 160);
+        if (!ownerWork || !collaboratorWork) return send(ws, { type: 'error', message: 'Describe both parts of the work before splitting' });
+        if (workSplits.has(request.cardId)) return send(ws, { type: 'error', message: 'This card already has a work split. Resolve it before splitting again' });
+        workSplits.set(request.cardId, {
+          cardId: request.cardId, owner: actor.name, collaborator: request.requester,
+          ownerWork, collaboratorWork, createdAt: new Date().toISOString(), requestId: request.id
+        });
+      }
+      request.status = msg.decision;
+      request.respondedAt = new Date().toISOString();
+      publish('collaboration-response', `${actor.name} ${msg.decision} ${request.requester}'s request on ${request.cardId}`);
+    } else if (msg.type === 'create-trello-split') {
+      const request = collaborationRequests.get(Number(msg.requestId));
+      const split = request && workSplits.get(request.cardId);
+      if (!request || request.status !== 'split' || !split || split.requestId !== request.id)
+        return send(ws, { type: 'error', message: 'Approved work split not found' });
+      if (split.owner !== actor.name || claims.get(split.cardId)?.owner !== actor.name)
+        return send(ws, { type: 'error', message: 'Only the current card owner can create a Trello split' });
+      if (split.trelloCardId || split.creating)
+        return send(ws, { type: 'error', message: 'Split already created or in progress' });
+      if (msg.confirm !== true)
+        return send(ws, { type: 'error', message: 'Explicit confirmation is required before creating a Trello card' });
+      split.creating = true;
+      try {
+        const result = await splitTrelloCard({
+          cardId: split.cardId, ownerWork: split.ownerWork,
+          collaboratorWork: split.collaboratorWork, collaboratorName: split.collaborator,
+          key: process.env.TRELLO_API_KEY, token: process.env.TRELLO_TOKEN
+        });
+        split.trelloCardId = result.newCardId;
+        split.trelloCardUrl = result.newCardUrl;
+        split.createdOnTrelloAt = new Date().toISOString();
+        publish('trello-card-split', `${actor.name} created a Trello split card for ${split.collaborator}`);
+        send(ws, { type: 'trello-split-created', ...result });
+      } catch (err) {
+        send(ws, { type: 'error', message: `Trello split failed: ${String(err.message).replace(/([?&](?:key|token)=)[^&\s]+/gi, '$1[redacted]')}` });
+      } finally { split.creating = false; }
     } else if (msg.type === 'release') {
       if (claims.get(cardId)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only claim owner can release' });
       claims.delete(cardId);
+      workSplits.delete(cardId);
       publish('released', `${actor.name} released ${cardId}`);
      } else if (msg.type === 'claim-field') {
       const field = clean(msg.field, 40);
@@ -342,4 +408,5 @@ wss.on('connection', (ws) => {
     publish('left', `${actor.name} disconnected (claims retained)`);
   });
 });
+installPhase4(server);
 server.listen(PORT, HOST, () => console.log(`Hub running at http://${HOST}:${PORT}`));
