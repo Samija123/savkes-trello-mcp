@@ -10,7 +10,7 @@ export async function fetchBoardHealth({ boardId, completedListNames, includeHis
   ]);
   // Trello limits board actions; keep this opt-in and explicitly mark the estimate.
   const actions = includeHistory ? await trello('GET', `/boards/${id}/actions`, { filter:'updateCard:idList', limit:1000, fields:'type,date,data' }) : [];
-  return analyzeBoard({boardId:id,boardName:board.name,lists,cards,actions,completedListNames,historyAvailable:includeHistory});
+  return analyzeBoard({boardId:id,boardName:board.name,lists,cards,actions,completedListNames,historyAvailable:includeHistory,sprint:{developers:process.env.SPRINT_DEVELOPERS,hoursPerDay:process.env.SPRINT_HOURS_PER_DAY,sprintEnd:process.env.SPRINT_END}});
 }
 const props = {
   boardId:{type:'string',description:'Board ID or short link; defaults to TRELLO_BOARD_ID'},

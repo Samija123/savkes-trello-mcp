@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeBoard, summarizeBoard } from './board-health.mjs';
+import { analyzeBoard, summarizeBoard, forecastSprint, estimatedHours } from './board-health.mjs';
 import { TOOLS } from './tools/board-health.mjs';
 const lists = [{id:'todo',name:'To Do'},{id:'done',name:'Done'}];
 const now = new Date('2026-11-14T12:00:00Z');
@@ -11,3 +11,14 @@ test('no due date is not automatically blocked',()=>{assert.equal(analyze([{id:'
 test('custom done list and archived exclusion',()=>{const a=analyze([{id:'1',idList:'qa'},{id:'2',idList:'todo',closed:true}],{lists:[...lists,{id:'qa',name:'Shipped'}],completedListNames:'Shipped'});assert.equal(a.metrics.completedCards,1);assert.equal(a.metrics.totalCards,1);});
 test('history optional, weekly throughput distinct card moves',()=>{const action={type:'updateCard',date:'2026-11-13T12:00:00Z',data:{card:{id:'c1'},listBefore:{id:'todo'},listAfter:{id:'done'}}};assert.equal(analyze([]).metrics.weeklyThroughput,null);assert.equal(analyze([],{historyAvailable:true,actions:[action,action]}).metrics.weeklyThroughput,1);});
 test('MCP tools expose read-only schemas',()=>{for(const key of ['analyzeBoardHealth','getBoardSummary']){assert.equal(TOOLS[key].annotations.readOnlyHint,true);assert.equal(typeof TOOLS[key].run,'function');}});
+
+test('sprint forecast accounts for working days and estimates',()=>{
+ const cards=[{desc:'Estimated hours: 10'},{desc:'[estimate: 3.5h]'}];
+ const f=forecastSprint(cards,{developers:1,hoursPerDay:4,sprintEnd:'2026-11-17',now:new Date('2026-11-16T12:00:00Z')});
+ assert.equal(f.remainingHours,13.5);assert.equal(f.capacityHours,8);assert.equal(f.status,'at_risk');
+});
+test('missing estimates prevent false on-track result',()=>{
+ const f=forecastSprint([{desc:'Estimated hours: 2'},{desc:'No estimate'}],{developers:2,hoursPerDay:8,sprintEnd:'2026-11-17',now:new Date('2026-11-16T12:00:00Z')});
+ assert.equal(f.status,'incomplete_estimates');assert.equal(f.missingEstimates,1);
+ assert.equal(estimatedHours({desc:'Estimated hours: 0'}),null);
+});
