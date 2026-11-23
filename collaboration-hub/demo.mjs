@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 const URL = process.env.HUB_URL || 'ws://127.0.0.1:8787/ws';
 function connect(name) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(URL);
+    const ws = new WebSocket(URL, { headers: { 'x-hub-token': process.env.HUB_BRIDGE_TOKEN || '' } });
     ws.once('error', reject);
     ws.once('open', () => {
       ws.send(JSON.stringify({ type: 'join', name }));

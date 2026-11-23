@@ -15,9 +15,18 @@ export function developerId() {
   return null;
 }
 
-export async function resolveDeveloperId() {
+// Resolved once per process so acquire and release always use the same identity;
+// otherwise concurrent first calls could each mint a different UUID and a release
+// would be rejected by the hub's owner check.
+let developerIdPromise = null;
+export function resolveDeveloperId() {
   const fromEnv = developerId();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return Promise.resolve(fromEnv);
+  developerIdPromise ??= loadOrCreateDeveloperId();
+  return developerIdPromise;
+}
+
+async function loadOrCreateDeveloperId() {
   try {
     const existing = await fs.readFile(DEV_ID_FILE, 'utf8');
     const trimmed = existing.trim();
@@ -25,8 +34,17 @@ export async function resolveDeveloperId() {
   } catch { /* file doesn't exist yet */ }
   const generated = crypto.randomUUID();
   try {
-    await fs.writeFile(DEV_ID_FILE, generated, { mode: 0o600 });
-  } catch { /* best-effort; identity still works in memory */ }
+    // 'wx' so another process that won the race keeps its ID and we adopt it.
+    await fs.writeFile(DEV_ID_FILE, generated, { mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      try {
+        const winner = (await fs.readFile(DEV_ID_FILE, 'utf8')).trim();
+        if (winner) return winner;
+      } catch { /* fall through to in-memory identity */ }
+    }
+    /* otherwise best-effort; identity still works in memory */
+  }
   return generated;
 }
 
@@ -47,25 +65,33 @@ export async function acquireFieldClaims(cardId, fields) {
   let target;
   try {
     target = new URL('/api/field-claim', HUB_URL);
-    if (!['http:', 'https:'].includes(target.protocol)) return { ok: false, error: 'Unsupported hub URL protocol' };
-  } catch { return { ok: false, error: 'Invalid hub URL' }; }
+    if (!['http:', 'https:'].includes(target.protocol)) return { ok: true, skipped: true, degraded: true, error: 'Unsupported hub URL protocol' };
+  } catch { return { ok: true, skipped: true, degraded: true, error: 'Invalid hub URL' }; }
 
-  const timeout = AbortSignal.timeout(2000);
-  const res = await fetch(target, {
-    method: 'POST',
-    headers: hubHeaders(),
-    body: JSON.stringify({ developerId: devId, cardId, fields }),
-    signal: timeout,
-  });
+  // A stopped or misbehaving hub must never block Trello writes: only a real 409
+  // conflict is reported as a conflict. Everything else is "degraded" and the caller
+  // proceeds in standalone mode (unless COLLAB_REQUIRE_HUB=true).
+  let res;
+  try {
+    res = await fetch(target, {
+      method: 'POST',
+      headers: hubHeaders(),
+      body: JSON.stringify({ developerId: devId, cardId, fields }),
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch (err) {
+    return { ok: true, skipped: true, degraded: true, error: String(err?.message ?? err) };
+  }
 
   if (res.status === 409) {
     const body = await res.json().catch(() => ({}));
-    return { ok: false, conflict: true, ...body };
+    return { ...body, ok: false, conflict: true };
   }
   if (!res.ok) {
-    return { ok: false, error: `HTTP ${res.status}` };
+    return { ok: true, skipped: true, degraded: true, error: `HTTP ${res.status}` };
   }
-  return { ok: true, devId, claimedAt: await res.json().then((b) => b.claimedAt) };
+  const body = await res.json().catch(() => ({}));
+  return { ok: true, devId, claimedAt: body.claimedAt };
 }
 
 export async function releaseFieldClaims(cardId, fields) {
@@ -96,8 +122,11 @@ export async function getFieldClaims(cardId) {
     if (!['http:', 'https:'].includes(target.protocol)) return { ok: true, claims: {}, skipped: true };
   } catch { return { ok: true, claims: {}, skipped: true }; }
 
-  const timeout = AbortSignal.timeout(2000);
-  const res = await fetch(target, { headers: hubHeaders(), signal: timeout });
-  if (!res.ok) return { ok: false, claims: {} };
-  return res.json();
+  try {
+    const res = await fetch(target, { headers: hubHeaders(), signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return { ok: false, claims: {} };
+    return await res.json();
+  } catch {
+    return { ok: false, claims: {} };
+  }
 }

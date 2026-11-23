@@ -30,6 +30,10 @@ HUB_BRIDGE_TOKEN=replace-with-long-random-secret
 
 Restart the MCP server after setting its environment variables. Its existing `tools/call` requests will send **tool name, card ID (if supplied), and success/failure** as best-effort events. No Trello credentials or full card content are sent. These events are **activity only**: the hub does not intercept or prevent real Trello changes. The browser task-claim system remains a coordination convention.
 
+**Failure behaviour.** If the hub is stopped or returns an error, Trello writes continue in standalone mode; only a real `409` field conflict blocks a write. Set `COLLAB_REQUIRE_HUB=true` on the MCP server to refuse writes while the hub is unreachable. Field claims expire after `CLAIM_TTL_MS` (default 10 minutes).
+
+**Dashboard security.** `/ws` accepts browser connections only from the dashboard origin (add others with `COLLAB_ALLOWED_ORIGINS`, comma-separated); non-browser clients such as `demo.mjs` must send the `x-hub-token` header.
+
 For local MCP smoke tests: `cd server && npm test && npm run smoke` (the original server is dependency-free).
 
 ## What's implemented

@@ -1,6 +1,6 @@
 /** Explicit Trello card split. No Trello write occurs until the owner confirms. */
 const API = 'https://api.trello.com/1';
-export async function splitTrelloCard({cardId, ownerWork, collaboratorWork, collaboratorName, key, token, fetchImpl = fetch}) {
+export async function splitTrelloCard({cardId, ownerWork, collaboratorWork, collaboratorName, ownerName, key, token, fetchImpl = fetch}) {
   if (!key || !token) throw new Error('Trello credentials are not configured on the hub');
   if (!/^[0-9a-f]{24}$/i.test(cardId)) throw new Error('Use the real 24-character Trello card ID, not a demo ID');
   if (!ownerWork?.trim() || !collaboratorWork?.trim()) throw new Error('Both task descriptions are required');
@@ -14,7 +14,7 @@ export async function splitTrelloCard({cardId, ownerWork, collaboratorWork, coll
   const body = new URLSearchParams({
     idList: original.idList,
     name: `${original.name} — ${collaboratorName} (split task)`.slice(0, 160),
-    desc: `Split from ${original.name}\nOriginal card: https://trello.com/c/${original.id}\n\nAssigned work (${collaboratorName}):\n${collaboratorWork}\n\nRemaining work (${ownerWork}):\n${ownerWork}`,
+    desc: `Split from ${original.name}\nOriginal card: https://trello.com/c/${original.id}\n\nAssigned work (${collaboratorName}):\n${collaboratorWork}\n\nRemaining work (${ownerName || 'owner'}):\n${ownerWork}`,
     pos: 'bottom', key, token
   });
   const createResponse = await fetchImpl(`${API}/cards`, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body.toString()});

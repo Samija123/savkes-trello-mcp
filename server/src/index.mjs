@@ -24,8 +24,14 @@
 import { PROMPTS } from "./prompts.mjs";
 import { listResources, readResource } from "./resources.mjs";
 import { TOOLS as CARD_TOOLS } from "./tools/cards.mjs";
-import { reportToolActivity, acquireFieldClaims, releaseFieldClaims, collaborationEnabled } from "./collaboration-bridge.mjs";
 import { TOOLS as HIERARCHY_TOOLS } from "./tools/hierarchy.mjs";
+import {
+  acquireFieldClaims,
+  collaborationEnabled,
+  releaseFieldClaims,
+  reportToolActivity,
+  requireHub,
+} from "./collaboration-bridge.mjs";
 
 // The selftest asserts the full name list, so a collision between the two halves shows
 // up as a short count — which is also why no total is written here: a number in a
@@ -185,14 +191,21 @@ export async function handle(msg) {
 
       // Acquire exactly the fields changed by this call. Creation and deletion
       // use a fixed resource-level lock, while partial updates use argument keys.
-      if (collaborationEnabled() && tool.annotations?.readOnlyHint === false) {
-        if (!tool.claimResource || !tool.fieldLocks) {
-          throw new Error("Collaboration protection unavailable for this tool; Trello was not modified");
-        }
-        const resourceArg = tool.claimResource;
-        const rawId = resourceArg === "boardId" && args.boardId === undefined
+      // Tools that declare no claim metadata are not lockable, so they run
+      // unprotected rather than failing. A hub outage also degrades to standalone
+      // mode (see acquireFieldClaims) unless COLLAB_REQUIRE_HUB=true; only a real
+      // 409 conflict blocks the write.
+      if (collaborationEnabled() && tool.annotations?.readOnlyHint === false
+          && tool.claimResource && tool.fieldLocks) {
+        let resourceArg = tool.claimResource;
+        let rawId = resourceArg === "boardId" && args.boardId === undefined
           ? process.env.TRELLO_BOARD_ID
           : args[resourceArg];
+        if (tool.resolveClaim) {
+          // Tools whose arguments don't name the shared resource (e.g. a check item
+          // only knows its card) look up the canonical resource to lock.
+          ({ resource: resourceArg, id: rawId } = await tool.resolveClaim(args));
+        }
         if (typeof rawId !== "string" || !rawId.trim()) {
           throw new Error("Collaboration resource ID unavailable; Trello was not modified");
         }
@@ -205,10 +218,18 @@ export async function handle(msg) {
         // Namespace non-card resources to avoid collisions with card identifiers.
         const resourceId = `${resourceArg}:${rawId}`;
         const acquired = await acquireFieldClaims(resourceId, fields);
-        if (!acquired || acquired.ok !== true || acquired.skipped === true) {
-          throw new Error("Collaboration claim unavailable or conflicting; Trello was not modified");
+        if (acquired?.conflict) {
+          const who = acquired.owner ? ` by ${acquired.owner}` : "";
+          throw new Error(
+            `Collaboration conflict: ${acquired.field ?? "field"} is being edited${who}; Trello was not modified`,
+          );
         }
-        claim = { cardId: resourceId, fields };
+        if (acquired?.ok === true && acquired.skipped !== true) {
+          claim = { cardId: resourceId, fields };
+        } else if (acquired?.ok !== true || (acquired.degraded && requireHub())) {
+          throw new Error("Collaboration hub unavailable and COLLAB_REQUIRE_HUB is set; Trello was not modified");
+        }
+        // else: hub down or disabled -> standalone mode, nothing to release.
       }
 
       const result = await tool.run(args);

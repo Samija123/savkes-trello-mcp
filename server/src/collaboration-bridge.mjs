@@ -36,3 +36,9 @@ export async function releaseFieldClaims(cardId, fields) {
 export function collaborationEnabled() {
   return process.env.COLLAB_ENABLED !== 'false' && Boolean(process.env.COLLAB_HUB_URL && process.env.HUB_BRIDGE_TOKEN);
 }
+
+// Opt-in strict mode: refuse Trello writes when the hub cannot be reached, instead of
+// degrading to standalone mode.
+export function requireHub() {
+  return process.env.COLLAB_REQUIRE_HUB === 'true';
+}

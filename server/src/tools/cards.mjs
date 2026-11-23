@@ -450,8 +450,21 @@ export const TOOLS = {
   },
 
   updateChecklistItem: {
-    claimResource: "cardId",
-    fieldLocks: { state: "checkItems", name: "checkItems" },
+    // All checklist operations share one lock: checklistId:<id>:checklist. A check
+    // item only knows its card, so resolve the owning checklist before claiming.
+    claimResource: "checklistId",
+    fieldLocks: { _: "checklist" },
+    async resolveClaim({ cardId, checkItemId }) {
+      const lists = await trello("GET", `/cards/${cardRef(cardId)}/checklists`, {
+        fields: "id",
+        checkItem_fields: "id",
+      });
+      const owner = (Array.isArray(lists) ? lists : []).find((l) =>
+        (l.checkItems ?? []).some((i) => i.id === checkItemId),
+      );
+      if (!owner) throw new Error(`Check item ${checkItemId} not found on card ${cardId}`);
+      return { resource: "checklistId", id: owner.id };
+    },
     description:
       "Tick, untick or rename one checklist item. Takes the CARD id plus the check " +
       "item id — Trello's update endpoint is card-scoped, so a checklistId is the one " +
@@ -512,7 +525,7 @@ export const TOOLS = {
 
   addChecklistItem: {
     claimResource: "checklistId",
-    fieldLocks: { _: "checkItems" },
+    fieldLocks: { _: "checklist" },
     description:
       "Add one item to an existing checklist. checklistId comes from addChecklist's " +
       "result or from getCardChecklists — it is not the card id.",

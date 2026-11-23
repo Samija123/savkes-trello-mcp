@@ -17,7 +17,11 @@ function authorized(given) {
   return !!BRIDGE_TOKEN && a.length === b.length && timingSafeEqual(a, b);
 }
 function now() { return Date.now(); }
-function isExpired(claimedAt) { return now() - claimedAt > CLAIM_TTL_MS; }
+function isExpired(claimedAt) {
+  // claimedAt is stored as an ISO string; Date.parse turns it into epoch ms.
+  const at = typeof claimedAt === 'number' ? claimedAt : Date.parse(claimedAt);
+  return Number.isFinite(at) && now() - at > CLAIM_TTL_MS;
+}
 function purgeExpired() {
   const expired = [];
   for (const [key, claim] of fieldClaims.entries()) {
@@ -35,7 +39,9 @@ let requestSequence = 0;
 const claims = new Map(); // cardId -> { owner, claimedAt }
 const events = [];
 const fieldClaims = new Map(); // cardId:field -> { owner, claimedAt }
-const cardVersions = new Map(); // cardId -> { version: number, fields: { [field]: value }, owner, claimedAt }
+const cardVersions = new Map(); // cardId -> latest { version: number, fields: { [field]: value }, owner, claimedAt }
+const cardVersionHistory = new Map(); // cardId -> Map(version -> record), newest 20 kept
+const MAX_VERSION_HISTORY = 20;
 const dependencies = new Map(); // cardId -> Set of prerequisite card IDs
 const statuses = new Map(); // cardId -> todo | doing | review | done
 
@@ -90,6 +96,7 @@ const server = http.createServer(async (req, res) => {
       if (!developerId) { res.writeHead(400); return res.end('Developer ID required'); }
       if (!cardId) { res.writeHead(400); return res.end('Card ID required'); }
       if (fields.length === 0) { res.writeHead(400); return res.end('At least one field required'); }
+      if (fields.some((f) => f.includes(':'))) { res.writeHead(400); return res.end('Field names cannot contain ":"'); }
 
       purgeExpired();
 
@@ -102,7 +109,7 @@ const server = http.createServer(async (req, res) => {
           return res.end(JSON.stringify({
             error: 'field_claim_conflict',
             cardId,
-            field: key.split(':')[1],
+            field: existing.field,
             owner: existing.owner,
             message: `Field ${key} is claimed by ${existing.owner}`,
           }));
@@ -111,8 +118,8 @@ const server = http.createServer(async (req, res) => {
 
       // Claim all fields atomically
       const claimedAt = new Date().toISOString();
-      for (const key of keys) {
-        fieldClaims.set(key, { owner: developerId, claimedAt });
+      for (const [i, key] of keys.entries()) {
+        fieldClaims.set(key, { owner: developerId, claimedAt, cardId, field: fields[i] });
       }
       publish('field-claimed', `${developerId} claimed ${keys.join(', ')} on ${cardId}`);
       res.writeHead(200);
@@ -134,7 +141,9 @@ const server = http.createServer(async (req, res) => {
       if (!developerId) { res.writeHead(400); return res.end('Developer ID required'); }
       if (!cardId) { res.writeHead(400); return res.end('Card ID required'); }
 
-      const keys = fields.length ? fields.map((f) => `${cardId}:${f}`) : [...fieldClaims.keys()].filter((k) => k.startsWith(`${cardId}:`));
+      const keys = fields.length
+        ? fields.map((f) => `${cardId}:${f}`)
+        : [...fieldClaims.entries()].filter(([, c]) => c.cardId === cardId).map(([k]) => k);
       const released = [];
       for (const key of keys) {
         const existing = fieldClaims.get(key);
@@ -149,13 +158,15 @@ const server = http.createServer(async (req, res) => {
     } catch { res.writeHead(400); return res.end('Invalid request'); }
   }
   if (req.url.startsWith('/api/field-claims/') && req.method === 'GET') {
-    const cardId = clean(req.url.slice('/api/field-claims/'.length), 80);
+    // Resource IDs are namespaced ("cardId:abc") and sent URL-encoded, so decode the
+    // path segment and match on the stored cardId rather than parsing the key.
+    let cardId;
+    try { cardId = clean(decodeURIComponent(req.url.slice('/api/field-claims/'.length).split('?')[0]), 80); }
+    catch { res.writeHead(400); return res.end('Invalid card ID'); }
     purgeExpired();
     const claims = {};
-    for (const [key, claim] of fieldClaims.entries()) {
-      if (key.startsWith(`${cardId}:`)) {
-        claims[key.split(':')[1]] = claim;
-      }
+    for (const claim of fieldClaims.values()) {
+      if (claim.cardId === cardId) claims[claim.field] = claim;
     }
     return json(res, { cardId, claims });
   }
@@ -181,9 +192,17 @@ const server = http.createServer(async (req, res) => {
         }
       }
       const versionNum = Date.now();
-      cardVersions.set(cardId, { version: versionNum, fields: snapshot, owner: developerId, claimedAt: new Date().toISOString() });
+      // Strictly increasing even for two snapshots in the same millisecond.
+      const prev = cardVersions.get(cardId);
+      const version = prev && prev.version >= versionNum ? prev.version + 1 : versionNum;
+      const record = { version, fields: snapshot, owner: developerId, claimedAt: new Date().toISOString() };
+      cardVersions.set(cardId, record);
+      const history = cardVersionHistory.get(cardId) || new Map();
+      history.set(version, record);
+      while (history.size > MAX_VERSION_HISTORY) history.delete(history.keys().next().value);
+      cardVersionHistory.set(cardId, history);
       res.writeHead(200);
-      return res.end(JSON.stringify({ ok: true, cardId, version: versionNum, snapshot }));
+      return res.end(JSON.stringify({ ok: true, cardId, version, snapshot }));
     } catch { res.writeHead(400); return res.end("Invalid request"); }
   }
   if (req.url === "/api/field-compare" && req.method === "POST") {
@@ -202,9 +221,12 @@ const server = http.createServer(async (req, res) => {
       if (!developerId) { res.writeHead(400); return res.end("Developer ID required"); }
       if (!cardId) { res.writeHead(400); return res.end("Card ID required"); }
       if (targetVersion === undefined) { res.writeHead(400); return res.end("targetVersion required"); }
-      const baseVersion = cardVersions.get(cardId);
-      if (!baseVersion) { res.writeHead(404); return res.end(JSON.stringify({ error: "no_base_version" })); }
+      // targetVersion is the version the client based its edit on; compare it with
+      // whatever is stored now.
       const currentRemote = cardVersions.get(cardId);
+      if (!currentRemote) { res.writeHead(404); return res.end(JSON.stringify({ error: "no_base_version" })); }
+      const baseVersion = cardVersionHistory.get(cardId)?.get(Number(targetVersion));
+      if (!baseVersion) { res.writeHead(404); return res.end(JSON.stringify({ error: "base_version_not_found", currentVersion: currentRemote.version })); }
       const changes = {};
       const proposedFieldList = proposedChanges ? Object.keys(proposedChanges) : [];
       for (const field of proposedFieldList) {
@@ -212,7 +234,8 @@ const server = http.createServer(async (req, res) => {
         const currentValue = currentRemote?.fields?.[field];
         const proposedValue = proposedChanges?.[field];
         let conflict = false;
-        if (baseValue !== proposedValue && currentRemote?.version > baseVersion.version) {
+        // Conflict: the remote moved on since the client's base AND changed this field.
+        if (currentRemote.version > baseVersion.version && baseValue !== currentValue && proposedValue !== currentValue) {
           conflict = true;
         }
         changes[field] = {
@@ -237,8 +260,23 @@ const server = http.createServer(async (req, res) => {
   } catch { res.writeHead(500); res.end('Dashboard unavailable'); }
 });
 const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+// Browsers don't apply CORS to WebSockets, so any page open in the developer's
+// browser could otherwise drive this hub. Browser connections must come from the
+// dashboard origin; non-browser clients (no Origin header) must present the bridge token.
+const ALLOWED_ORIGINS = new Set([
+  `http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`, `http://[::1]:${PORT}`,
+  `http://${HOST}:${PORT}`,
+  ...String(process.env.COLLAB_ALLOWED_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean),
+]);
+function wsAllowed(req) {
+  const origin = req.headers.origin;
+  if (origin !== undefined) return ALLOWED_ORIGINS.has(origin);
+  return authorized(req.headers['x-hub-token']);
+}
 server.on('upgrade', (req, socket, head) => {
-  if (req.url === '/ws') wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+  if (req.url !== '/ws') return;
+  if (!wsAllowed(req)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
 });
 function json(res, data) {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -276,7 +314,8 @@ wss.on('connection', (ws) => {
     const actor = participants.get(ws);
     if (msg.type === 'join') {
       const name = clean(msg.name || msg.developerId, 40);
-      const role = msg.role || 'developer';
+      const role = msg.role === undefined ? 'developer' : msg.role;
+      if (typeof role !== 'string' || !roles.has(role)) return send(ws, { type: 'error', message: 'Unknown role' });
       if (!name) return send(ws, { type: 'error', message: 'Name required' });
       if ([...participants.entries()].some(([socket, person]) => socket !== ws && person.name === name)) return send(ws, { type: 'error', message: 'This name is already connected; choose a different name' });
       participants.set(ws, { name, role, cardId: null, joinedAt: new Date().toISOString() });
@@ -343,7 +382,7 @@ wss.on('connection', (ws) => {
       try {
         const result = await splitTrelloCard({
           cardId: split.cardId, ownerWork: split.ownerWork,
-          collaboratorWork: split.collaboratorWork, collaboratorName: split.collaborator,
+          collaboratorWork: split.collaboratorWork, collaboratorName: split.collaborator, ownerName: split.owner,
           key: process.env.TRELLO_API_KEY, token: process.env.TRELLO_TOKEN
         });
         split.trelloCardId = result.newCardId;
@@ -362,13 +401,15 @@ wss.on('connection', (ws) => {
      } else if (msg.type === 'claim-field') {
       const field = clean(msg.field, 40);
       if (!cardId || !field) return send(ws, { type: 'error', message: 'Card and field required' });
+      if (field.includes(':')) return send(ws, { type: 'error', message: 'Field names cannot contain ":"' });
+      purgeExpired();
       const key = `${cardId}:${field}`;
       const existing = fieldClaims.get(key);
       if (existing && existing.owner !== actor.name) {
         send(ws, { type: 'conflict', cardId, field, owner: existing.owner, message: `${key} is being edited by ${existing.owner}` });
         publish('field-overlap', `${actor.name} overlaps ${existing.owner} on ${key}`);
       } else {
-        fieldClaims.set(key, { owner: actor.name, claimedAt: new Date().toISOString() });
+        fieldClaims.set(key, { owner: actor.name, claimedAt: new Date().toISOString(), cardId, field });
         publish('field-claimed', `${actor.name} is editing ${key}`);
       }
     } else if (msg.type === 'release-field') {
