@@ -4,13 +4,31 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { fetchBoardHealth } from './tools/board-health.mjs';
 import { summarizeBoard } from './board-health.mjs';
+import { logRequestError } from './utils/errors.mjs';
 
 const host = '127.0.0.1';
 const port = Number(process.env.BOARD_DASHBOARD_PORT || 8790);
 
-const htmlPath = fileURLToPath(
-  new URL('../dashboard/index.html', import.meta.url)
-);
+const API_BASE = '/api';
+
+// Route table: path -> how to turn the board analysis into the response body.
+const API_ROUTES = {
+  [`${API_BASE}/health`]: analysis => analysis,
+  [`${API_BASE}/summary`]: summarizeBoard
+};
+
+const dashboardFile = name =>
+  fileURLToPath(new URL(`../dashboard/${name}`, import.meta.url));
+
+// Static dashboard assets served next to the page, keyed by URL path.
+const ASSETS = {
+  '/dashboard.js': {
+    file: dashboardFile('dashboard.js'),
+    type: 'text/javascript; charset=utf-8'
+  }
+};
+
+const htmlPath = dashboardFile('index.html');
 
 const json = (res, code, payload) => {
   res.writeHead(code, {
@@ -24,7 +42,8 @@ const json = (res, code, payload) => {
 
 export function createDashboardServer({
   analyze = fetchBoardHealth,
-  page = () => readFile(htmlPath)
+  page = () => readFile(htmlPath),
+  assets = ASSETS
 } = {}) {
   return http.createServer(async (req, res) => {
     try {
@@ -45,7 +64,7 @@ export function createDashboardServer({
           'X-Content-Type-Options': 'nosniff',
           'Content-Security-Policy':
             "default-src 'self'; " +
-            "script-src 'self' 'unsafe-inline'; " +
+            "script-src 'self'; " +
             "style-src 'self' 'unsafe-inline'; " +
             "connect-src 'self'; " +
             "object-src 'none'; " +
@@ -55,21 +74,26 @@ export function createDashboardServer({
         return res.end(content);
       }
 
-      if (
-        url.pathname === '/api/health' ||
-        url.pathname === '/api/summary'
-      ) {
+      const asset = assets[url.pathname];
+
+      if (asset) {
+        res.writeHead(200, {
+          'Content-Type': asset.type,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff'
+        });
+
+        return res.end(await readFile(asset.file));
+      }
+
+      const toBody = API_ROUTES[url.pathname];
+
+      if (toBody) {
         const analysis = await analyze({
           includeHistory: false
         });
 
-        return json(
-          res,
-          200,
-          url.pathname === '/api/summary'
-            ? summarizeBoard(analysis)
-            : analysis
-        );
+        return json(res, 200, toBody(analysis));
       }
 
       return json(res, 404, {
@@ -77,17 +101,7 @@ export function createDashboardServer({
       });
 
     } catch (err) {
-      const safeMessage = String(err?.message || 'Unknown error')
-        .replace(
-          /([?&](?:key|token)=)[^&\s]+/gi,
-          '$1[redacted]'
-        );
-
-      console.error('Dashboard request failed:', {
-        name: err?.name,
-        status: err?.status ?? err?.statusCode,
-        message: safeMessage
-      });
+      logRequestError('Dashboard request', err);
 
       if (!res.headersSent) {
         return json(res, 502, {

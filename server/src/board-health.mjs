@@ -1,41 +1,30 @@
 
+import { asArray } from './utils/arrays.mjs';
+import { forecastSprint } from './sprint-forecast.mjs';
+
+// Re-exported so existing imports from board-health.mjs keep working.
+export { estimatedHours, forecastSprint } from './sprint-forecast.mjs';
+
 const DEFAULT_DONE_LISTS = ['done', 'completed', 'closed'];
 
-const asArray = value => Array.isArray(value) ? value : [];
+const DAY_MS = 86400000;
 
-const daysBetween = (a, b) =>
-  Math.round((new Date(b) - new Date(a)) / 86400000);
+// Distinct cards moved into a done list during the 7 days before `now`.
+export function countWeeklyCompletions(actions, { now, isDoneList }) {
+  const to = now.getTime();
+  const from = to - 7 * DAY_MS;
+  const inWindow = action => {
+    const at = Date.parse(action?.date);
+    return at >= from && at <= to; // NaN (missing/invalid date) is false
+  };
 
-// Estimate format on a card: "Estimated hours: 2" or "[estimate: 2h]".
-export function estimatedHours(card) {
-  const description = String(card?.desc || '');
-  const match = description.match(/(?:\[estimate\s*:\s*|estimated?\s+(?:working\s+)?(?:hours?|time)\s*:\s*)(\d+(?:\.\d+)?)\s*(?:h(?:ours?)?)?\]?/i);
-  if (!match) return null;
-  const hours = Number(match[1]);
-  return Number.isFinite(hours) && hours > 0 && hours <= 10000 ? hours : null;
-}
+  const cardIds = asArray(actions)
+    .filter(inWindow)
+    .filter(action => isDoneList(action.data?.listAfter))
+    .map(action => action.data?.card?.id)
+    .filter(Boolean);
 
-export function forecastSprint(cards, { developers, hoursPerDay, sprintEnd, now = new Date() } = {}) {
-  const items = asArray(cards);
-  const estimated = items.map(card => ({ card, hours: estimatedHours(card) }));
-  const known = estimated.filter(item => item.hours !== null);
-  const remainingHours = Number(known.reduce((sum, item) => sum + item.hours, 0).toFixed(2));
-  const missingEstimates = items.length - known.length;
-  const headcount = Number(developers);
-  const dailyHours = Number(hoursPerDay);
-  const end = sprintEnd ? new Date(`${sprintEnd}T23:59:59`) : null;
-  const validConfig = Number.isInteger(headcount) && headcount > 0 && Number.isFinite(dailyHours) && dailyHours > 0 && dailyHours <= 24 && end && !Number.isNaN(end.getTime());
-  if (!validConfig) return { status: 'not_configured', remainingHours, estimatedCards: known.length, missingEstimates, totalActiveCards: items.length, message: 'Set SPRINT_END (YYYY-MM-DD), SPRINT_DEVELOPERS and SPRINT_HOURS_PER_DAY to forecast capacity.' };
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  let workingDays = 0;
-  for (let day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
-    if (day.getDay() !== 0 && day.getDay() !== 6) workingDays++;
-  }
-  const capacityHours = Number((workingDays * headcount * dailyHours).toFixed(2));
-  const shortfallHours = Number(Math.max(0, remainingHours - capacityHours).toFixed(2));
-  const status = missingEstimates ? 'incomplete_estimates' : shortfallHours ? 'at_risk' : 'on_track';
-  return { status, remainingHours, capacityHours, shortfallHours, workingDays, developers: headcount, hoursPerDay: dailyHours, sprintEnd, estimatedCards: known.length, missingEstimates, totalActiveCards: items.length, message: missingEstimates ? 'Some unfinished cards have no time estimate; forecast is incomplete.' : shortfallHours ? 'Estimated workload exceeds available sprint capacity.' : 'Estimated workload fits available sprint capacity.' };
+  return new Set(cardIds).size;
 }
 
 export function analyzeBoard({
@@ -83,7 +72,7 @@ export function analyzeBoard({
 
     return (
       due >= currentDate &&
-      due <= new Date(currentDate.getTime() + 7 * 86400000)
+      due <= new Date(currentDate.getTime() + 7 * DAY_MS)
     );
   });
 
@@ -129,40 +118,13 @@ export function analyzeBoard({
     }))
     .sort((a, b) => a.memberId.localeCompare(b.memberId));
 
-  let weeklyThroughput = null;
+  const isDoneList = list =>
+    Boolean(list) &&
+    (doneListIds.has(list.id) || doneNames.includes(list.name?.trim().toLowerCase()));
 
-  if (historyAvailable) {
-    const weekAgo = currentDate.getTime() - 7 * 86400000;
-    const completedMovements = new Set();
-
-    for (const action of asArray(actions)) {
-      if (!action.date) continue;
-
-      const actionTime = new Date(action.date).getTime();
-
-      if (actionTime < weekAgo || actionTime > currentDate.getTime()) {
-        continue;
-      }
-
-      const destination = action.data?.listAfter;
-
-      if (
-        destination &&
-        (
-          doneListIds.has(destination.id) ||
-          doneNames.includes(destination.name?.trim().toLowerCase())
-        )
-      ) {
-        const cardId = action.data?.card?.id;
-
-        if (cardId) {
-          completedMovements.add(cardId);
-        }
-      }
-    }
-
-    weeklyThroughput = completedMovements.size;
-  }
+  const weeklyThroughput = historyAvailable
+    ? countWeeklyCompletions(actions, { now: currentDate, isDoneList })
+    : null;
 
   const sprintForecast = forecastSprint(inProgressCards, { ...sprint, now: currentDate });
 
@@ -188,36 +150,20 @@ export function analyzeBoard({
         )
       );
 
-  const recommendations = [];
-
-  if (blocked.length) {
-    recommendations.push(
-      `Unblock ${blocked.length} explicitly flagged card(s).`
-    );
-  }
-
-  if (overdue.length) {
-    recommendations.push(
-      `Review ${overdue.length} overdue card(s).`
-    );
-  }
-
-  if (unassigned.length) {
-    recommendations.push(
-      `Assign owners to ${unassigned.length} active card(s).`
-    );
-  }
-
   const busiestLists = [...listStats]
     .filter(l => l.activeCards > 0)
     .sort((a, b) => b.activeCards - a.activeCards)
     .slice(0, 2);
 
-  if (busiestLists.length) {
-    recommendations.push(
-      `Review WIP in ${busiestLists.map(l => l.name).join(', ')}.`
-    );
-  }
+  // [count, message]: an entry is reported only when its count is non-zero.
+  const recommendations = [
+    [blocked.length, `Unblock ${blocked.length} explicitly flagged card(s).`],
+    [overdue.length, `Review ${overdue.length} overdue card(s).`],
+    [unassigned.length, `Assign owners to ${unassigned.length} active card(s).`],
+    [busiestLists.length, `Review WIP in ${busiestLists.map(l => l.name).join(', ')}.`]
+  ]
+    .filter(([count]) => count)
+    .map(([, message]) => message);
 
   if (!recommendations.length) {
     recommendations.push('No immediate board risks detected.');

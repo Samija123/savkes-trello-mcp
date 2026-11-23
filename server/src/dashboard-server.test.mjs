@@ -18,3 +18,14 @@ test('dashboard does not expose upstream errors',async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  try{const res=await fetch(`http://127.0.0.1:${server.address().port}/api/health`);assert.equal(res.status,502);assert.doesNotMatch(await res.text(),/secret-placeholder/)}finally{await new Promise(resolve=>server.close(resolve))}
 });
+test('dashboard serves its script and a strict CSP',async()=>{
+ const server=createDashboardServer({analyze:async()=>fake,page:async()=>'<html></html>'});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{const base=`http://127.0.0.1:${server.address().port}`;
+  const js=await fetch(base+'/dashboard.js');
+  assert.equal(js.status,200);assert.match(js.headers.get('content-type'),/javascript/);
+  assert.match(await js.text(),/HEALTH_URL/);
+  const csp=(await fetch(base+'/')).headers.get('content-security-policy');
+  assert.match(csp,/script-src 'self';/);assert.doesNotMatch(csp,/script-src[^;]*unsafe-inline/);
+ }finally{await new Promise(resolve=>server.close(resolve))}
+});

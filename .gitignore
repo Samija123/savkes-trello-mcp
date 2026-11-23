@@ -2,3 +2,6 @@
 .env.*
 !.env.example
 .claude/tasks/
+
+.DS_Store
+node_modules/
