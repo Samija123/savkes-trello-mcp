@@ -1,10 +1,11 @@
-// Every failure the report tools can produce, in one place, so the same problem always
-// reads the same way and a test can check it by its code.
+// Every failure the report tools raise themselves, in one place, so the same problem always
+// reads the same way and a test can check it by its code. Two come from elsewhere: Trello's
+// own errors from trello/client.mjs, and wrong argument types from validateArgs in index.mjs.
 //
 // Two kinds live here. A ToolError is thrown: the call stops, and tools/call in index.mjs
 // hands the message to the model as an isError result, which is what lets it try again with
-// better arguments. A GitHub check that fails is not thrown: one dead link must not fail a
-// whole audit, so it comes back as an "unverified" result instead.
+// better arguments. A GitHub check that cannot run, or fails, is not thrown: one dead link
+// must not fail a whole audit, so it comes back as a result that says why.
 
 // --- Thrown -------------------------------------------------------------------------
 
@@ -43,6 +44,9 @@ export const githubTokenMissing = () =>
   new ToolError("github_token_missing", "A GitHub token is required to check pull requests.", "Set GITHUB_TOKEN to a read-only token.");
 
 // --- Reported, not thrown -----------------------------------------------------------
+
+// verifyPullRequests was asked for without a usable token: nothing is sent to GitHub.
+export const GITHUB_TOKEN_NOT_SET = Object.freeze({ enabled: false, reason: "GITHUB_TOKEN is not set" });
 
 // Why GitHub could not say whether a pull request was merged, and whether trying again could
 // help. None of these is ever read as merged or as not merged.

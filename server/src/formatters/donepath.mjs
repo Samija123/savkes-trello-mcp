@@ -5,7 +5,7 @@ import { mdText, more, reportHeader } from "./markdown.mjs";
 
 export function renderDonePathAudit(boardName, audit, { now = Date.now() } = {}) {
   const { doneCards, noHistory, createdInDone, skipped, doneMoves, bursts, movedByAssignee, settings } = audit;
-  const out = reportHeader(`Done-path audit: ${boardName}`, now);
+  const out = reportHeader(`Done-path audit: ${mdText(boardName)}`, now);
   out.push(`**${doneCards} ${doneCards === 1 ? "card sits" : "cards sit"} in Done.** Here is how they got there.`, "");
 
   out.push("## Stages skipped");

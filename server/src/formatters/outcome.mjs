@@ -43,7 +43,7 @@ const askedGitHub = (v) => Boolean(v?.enabled && v.pullRequests.merged + v.pullR
 
 export function renderOutcomeAudit(boardName, audit, { now = Date.now(), verification } = {}) {
   const { progress, provenDone, items, unprovenSignOff, waiting, ruleBreaks, inconsistent, missingParent, exemptLabels, rule, evidence } = audit;
-  const out = reportHeader(`Outcome audit: ${boardName}`, now);
+  const out = reportHeader(`Outcome audit: ${mdText(boardName)}`, now);
 
   const sit = progress.total === 1 ? "item sits" : "items sit";
   const shows = provenDone.done === 1 ? "shows" : "show";

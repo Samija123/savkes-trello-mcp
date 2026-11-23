@@ -11,11 +11,12 @@
 
 import { cap, doneListTest, percentOf } from "./rollup.mjs";
 
+// Exported so the tool description in reports.mjs states the same values the audit uses.
 export const DEFAULT_BURST_SIZE = 5;
-const BURST_MINUTES = 5;
+export const BURST_MINUTES = 5;
 const BURST_MS = BURST_MINUTES * 60_000;
-const DEFAULT_PROGRESS = ["In Progress"];
-const DEFAULT_REVIEW = ["Testing/Review", "Testing", "Review", "QA"];
+export const DEFAULT_PROGRESS = Object.freeze(["In Progress"]);
+export const DEFAULT_REVIEW = Object.freeze(["Testing/Review", "Testing", "Review", "QA"]);
 
 const byTime = (a, b) => Date.parse(a.at) - Date.parse(b.at);
 

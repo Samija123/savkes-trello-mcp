@@ -7,7 +7,7 @@ import { bar, groupLine, mdText, moreLine, reportHeader } from "./markdown.mjs";
 // The report a person would send a client: no ids, no JSON, plain sentences.
 export function renderReport(boardName, report, { now = Date.now() } = {}) {
   const { progress, items, readyForSignOff, attention, openByList } = report;
-  const out = reportHeader(`Delivery status: ${boardName}`, now);
+  const out = reportHeader(`Delivery status: ${mdText(boardName)}`, now);
 
   const tier = items[0]?.tier ?? "epic";
   const orphans = attention.missingParent.count;

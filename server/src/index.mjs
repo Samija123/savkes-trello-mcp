@@ -230,7 +230,9 @@ async function dispatch(line) {
       send({
         jsonrpc: "2.0",
         id: msg.id,
-        error: { code: err.code ?? -32603, message: String(err.message ?? err) },
+        // Numbers only: a ToolError's code ("invalid_argument") names the problem for tools/call,
+        // and JSON-RPC requires an integer here.
+        error: { code: Number.isInteger(err.code) ? err.code : -32603, message: String(err.message ?? err) },
       });
     }
   }

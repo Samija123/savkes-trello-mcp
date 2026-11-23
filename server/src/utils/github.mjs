@@ -14,8 +14,9 @@ import { cap } from "./rollup.mjs";
 const API = "https://api.github.com";
 const NAME = /^[A-Za-z0-9_.-]+$/;
 const PULL = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
-// At most this many pull requests are asked about per audit, this many at a time.
-const CHECK_LIMIT = 100;
+// At most this many pull requests are asked about per audit, this many at a time. The limit is
+// exported so the tool description in reports.mjs states the same number.
+export const CHECK_LIMIT = 100;
 const CONCURRENCY = 5;
 const TIMEOUT_MS = 10_000;
 

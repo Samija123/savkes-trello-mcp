@@ -99,7 +99,7 @@ const redact = (text) =>
 // exists in the environment; when it does not, the literal placeholder text is passed
 // through as the credential. Trello then answers 401 with nothing that points at the
 // real cause, so both that shape and the plain-empty case are named here instead.
-const PLACEHOLDER = /^\$\{[^}]*\}$/;
+export const PLACEHOLDER = /^\$\{[^}]*\}$/;
 
 // Same placeholder trap for the optional board: unset must read as "no default",
 // not as a board literally named "${TRELLO_BOARD_ID}".

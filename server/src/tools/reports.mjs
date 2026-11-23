@@ -2,14 +2,14 @@
 // of what "Done" means. The numbers are worked out in utils/, the text is written in
 // formatters/; this file only fetches the board and maps tool arguments onto it.
 
-import { invalidArgument, noNumberedCards } from "../errors.mjs";
+import { GITHUB_TOKEN_NOT_SET, invalidArgument, noNumberedCards } from "../errors.mjs";
 import { renderDonePathAudit } from "../formatters/donepath.mjs";
 import { renderOutcomeAudit } from "../formatters/outcome.mjs";
 import { renderMermaid, renderOutline, renderReport } from "../formatters/rollup.mjs";
 import { noteBlock, warning } from "../formatters/warnings.mjs";
-import { resolveBoard, trello } from "../trello/client.mjs";
-import { DEFAULT_BURST_SIZE, buildDonePathAudit } from "../utils/donepath.mjs";
-import { checkPullRequests, pullRequestsOnCards, summarizeVerification } from "../utils/github.mjs";
+import { PLACEHOLDER, resolveBoard, trello } from "../trello/client.mjs";
+import { BURST_MINUTES, DEFAULT_BURST_SIZE, DEFAULT_PROGRESS, DEFAULT_REVIEW, buildDonePathAudit } from "../utils/donepath.mjs";
+import { CHECK_LIMIT, checkPullRequests, pullRequestsOnCards, summarizeVerification } from "../utils/github.mjs";
 import { buildOutcomeAudit, countsAsDone, indexFacts } from "../utils/outcome.mjs";
 import { buildReport, buildTree, doneListTest, scopeTo, walk } from "../utils/rollup.mjs";
 
@@ -26,6 +26,11 @@ const ACTIONS_READ = ACTION_PAGE * ACTION_PAGES;
 
 const REPORT_FORMATS = ["markdown", "json"];
 
+// Board ids and shortLinks are letters and digits. boardPath puts the id into the URL as it
+// is, and the URL parser resolves a ".." segment, so anything else could step out of
+// /boards/<id> to another endpoint; it is refused before a request goes out.
+const BOARD_REF = /^[A-Za-z0-9]+$/;
+
 // Schema pieces several tools share, so the same argument is described the same way everywhere.
 const boardProp = { type: "string", description: "Board to read; defaults to TRELLO_BOARD_ID" };
 const epicProp = {
@@ -41,6 +46,14 @@ const doneListsProp = {
   items: { type: "string" },
   description:
     'Exact names of the lists that hold finished work, e.g. ["Shipped"]. Default: any list whose name starts with Done, Complete, Completed, Shipped, Released, Closed or Finished',
+};
+
+// The board a report reads: the boardId argument or TRELLO_BOARD_ID, as every board tool
+// takes it, and only one that boardPath can put in a URL safely.
+const reportBoard = (boardId) => {
+  const board = resolveBoard(boardId);
+  if (!BOARD_REF.test(board)) throw invalidArgument("boardId", "a board URL, shortLink or id", board);
+  return board;
 };
 
 // Every request here is under one board, so its path is spelled in one place.
@@ -221,7 +234,7 @@ export const TOOLS = {
     async run({ boardId, epic, format = "markdown", staleDays = 14, doneLists } = {}) {
       oneOf("format", format, REPORT_FORMATS);
       if (!(staleDays > 0)) throw invalidArgument("staleDays", "a positive number", staleDays);
-      const board = resolveBoard(boardId);
+      const board = reportBoard(boardId);
       const { name, tree, cardCount } = await loadTree(board, doneLists);
       const now = Date.now();
       const report = buildReport(scopeTo(tree, epic), { now, staleDays });
@@ -277,13 +290,13 @@ export const TOOLS = {
         verifyPullRequests: {
           type: "boolean",
           description:
-            "Ask GitHub whether the pull requests on Done cards were merged (default: false). Needs GITHUB_TOKEN, a read-only token; without it nothing is asked and the result says so. Up to 100 pull requests, github.com links only",
+            `Ask GitHub whether the pull requests on Done cards were merged (default: false). Needs GITHUB_TOKEN, a read-only token; without it nothing is asked and the result says so. Up to ${CHECK_LIMIT} pull requests, github.com links only`,
         },
       },
     },
     async run({ boardId, epic, format = "markdown", doneLists, exemptLabels = [], verifyPullRequests = false } = {}) {
       oneOf("format", format, REPORT_FORMATS);
-      const board = resolveBoard(boardId);
+      const board = reportBoard(boardId);
       // Comments come from their own paged request; everything else is the same four reads
       // the status report makes, plus members and attachment links on the cards.
       const [{ name, tree, cardCount, cards, checklistsByCard, listNames }, comments] = await Promise.all([
@@ -311,10 +324,11 @@ export const TOOLS = {
       };
       let verification;
       if (verifyPullRequests) {
-        // A client that did not expand "${GITHUB_TOKEN}" hands over the literal text; that is no token.
-        const token = process.env.GITHUB_TOKEN?.trim();
-        if (!token || /^\$\{.*\}$/.test(token)) {
-          verification = { enabled: false, reason: "GITHUB_TOKEN is not set" };
+        // A client that did not expand "${GITHUB_TOKEN}" hands over the literal text; that is no
+        // token. Same test as the Trello credentials in trello/client.mjs.
+        const token = String(process.env.GITHUB_TOKEN ?? "").trim();
+        if (!token || PLACEHOLDER.test(token)) {
+          verification = GITHUB_TOKEN_NOT_SET;
         } else {
           // The same cards the audit counts as Done, inside the same epic scope. Matched by card,
           // not by number, so a second card that shares a Done card's number is left out.
@@ -345,8 +359,8 @@ export const TOOLS = {
     description:
       "Shows how the cards in Done got there, from the card history. Counts the Done cards that " +
       "never sat in a progress list or a review list, those created straight in Done (written " +
-      "down afterwards, so not counted as skipping), batches of 5 or more cards moved into Done " +
-      "by one member within 5 minutes, and moves made by a current member of the card. A list " +
+      `down afterwards, so not counted as skipping), batches of ${DEFAULT_BURST_SIZE} or more cards moved into Done ` +
+      `by one member within ${BURST_MINUTES} minutes, and moves made by a current member of the card. A list ` +
       "of cards worth a look, not a verdict: no member is named, only counts and card names come " +
       "back. Read-only. Returns { boardId, board, format, report } with report as markdown; with " +
       "format \"json\" it returns the same numbers as fields. boardId defaults to TRELLO_BOARD_ID.",
@@ -360,12 +374,12 @@ export const TOOLS = {
         progressLists: {
           type: "array",
           items: { type: "string" },
-          description: 'Exact names of the lists where work is under way. Default: ["In Progress"]',
+          description: `Exact names of the lists where work is under way. Default: ${JSON.stringify(DEFAULT_PROGRESS)}`,
         },
         reviewLists: {
           type: "array",
           items: { type: "string" },
-          description: 'Exact names of the lists where work is reviewed or tested. Default: ["Testing/Review", "Testing", "Review", "QA"]',
+          description: `Exact names of the lists where work is reviewed or tested. Default: ${JSON.stringify(DEFAULT_REVIEW)}`,
         },
         burstSize: {
           type: "integer",
@@ -376,7 +390,7 @@ export const TOOLS = {
     async run({ boardId, format = "markdown", doneLists, progressLists, reviewLists, burstSize = DEFAULT_BURST_SIZE } = {}) {
       oneOf("format", format, REPORT_FORMATS);
       if (!Number.isInteger(burstSize) || burstSize < 2) throw invalidArgument("burstSize", "a whole number of 2 or more", burstSize);
-      const board = resolveBoard(boardId);
+      const board = reportBoard(boardId);
       const [{ name, listNames }, cards, moves] = await Promise.all([
         loadBoard(board),
         trello("GET", boardPath(board, "cards"), { fields: "name,idList,idMembers" }),
@@ -429,7 +443,7 @@ export const TOOLS = {
     async run({ boardId, epic, format = "outline", depth = 3, doneLists } = {}) {
       oneOf("format", format, ["outline", "mermaid"]);
       if (!Number.isInteger(depth) || depth < 1) throw invalidArgument("depth", "a whole number of 1 or more", depth);
-      const board = resolveBoard(boardId);
+      const board = reportBoard(boardId);
       const { name, tree } = await loadTree(board, doneLists, { criteria: false });
       const roots = scopeTo(tree, epic);
       const map = format === "mermaid" ? renderMermaid(roots, depth) : renderOutline(roots, depth);

@@ -1426,6 +1426,15 @@ assert.equal(sawSignal.aborted, false);
     assert.match(bad.text, pattern);
   }
 
+  // A board id that is not letters and digits is refused before any request goes out: the URL
+  // parser would resolve its ".." and read another Trello endpoint. A board URL still works.
+  for (const boardId of ["../members/me", "..", "BX/../../members/me"]) {
+    const bad = await call("getStatusReport", { boardId });
+    assert.match(bad.text, /^invalid_argument: boardId must be a board URL, shortLink or id, got /, boardId);
+    assert.equal(sent.length, 0, boardId);
+  }
+  assert.notEqual((await call("getStatusReport", { boardId: "https://trello.com/b/BX/acme-delivery" })).isError, true);
+
   const outlineMap = await call("getBoardMap");
   assert.equal(outlineMap.data.format, "outline");
   assert.match(outlineMap.data.map, /^EPIC 1\. Auth {2}█████░░░░░ 50% \(2\/4\)\n/);
@@ -2263,6 +2272,14 @@ assert.equal(sawSignal.aborted, false);
   assert.equal(warning("pathsTruncated", { read: 10 }), "the board has more card moves than were read (10), so some cards may look as if they skipped a stage.");
   assert.equal(noteBlock([]), "");
   assert.equal(noteBlock(["a.", "b."]), "\n\n_Note: a._\n_Note: b._");
+
+  // A board name is text in every report title, the way card names are in the body.
+  const titles = [
+    renderReport("Q4 *launch*", buildReport([])),
+    renderOutcomeAudit("Q4 *launch*", buildOutcomeAudit([], new Map())),
+    renderDonePathAudit("Q4 *launch*", buildDonePathAudit({ cards: [], events: [] })),
+  ].map((report) => report.split("\n")[0]);
+  assert.deepEqual(titles, ["# Delivery status: Q4 \\*launch\\*", "# Outcome audit: Q4 \\*launch\\*", "# Done-path audit: Q4 \\*launch\\*"]);
 }
 
 // ---------------------------------------------------------------------------
