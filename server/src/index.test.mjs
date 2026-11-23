@@ -1295,6 +1295,9 @@ assert.equal(sawSignal.aborted, false);
   assert.deepEqual(report.attention.overdue.items.map((c) => [c.number, c.daysLate]), [["1.2.1", 5]]);
   assert.deepEqual(report.attention.stale.items.map((c) => [c.number, c.daysIdle]), [["1.2.1", 30]]);
   assert.deepEqual(report.openByList, { "Current Sprint Backlog": 1, Backlog: 2 });
+  // A list named like an Object.prototype member is still just a list.
+  const oddList = buildTree({ cards: [{ id: "a", name: "EPIC 1. A", idList: "L" }, { id: "b", name: "1.1. B", idList: "L" }], lists: { L: "constructor" } });
+  assert.deepEqual(buildReport(oddList.roots).openByList, { constructor: 1 });
   // Idle time is about work items: an epic nobody touched is not "idle".
   assert.equal(report.attention.stale.items.some((c) => c.number === "1"), false);
 
@@ -1851,6 +1854,16 @@ assert.equal(sawSignal.aborted, false);
   movePages = () => [move("m5", "t131", "Doing", daysAgo(5)), ...fixtureMoves];
   const leftDone = await call({ format: "json" });
   assert.equal(leftDone.data.waiting.items.find((w) => w.number === "1.3.1").days, null, "an old move into Done is not used once the card left");
+  // A move between two Done-style lists (Shipped -> Done) is not when the card became Done:
+  // t131 came into Done from Doing 9 days ago, and yesterday's move does not restart that clock.
+  const doneToDone = { id: "m6", type: "updateCard", date: daysAgo(1), data: { card: { id: "t131" }, listBefore: { id: "y", name: "Shipped" }, listAfter: { id: "x", name: "Done" } } };
+  mockCards = fixtureCards();
+  movePages = () => [doneToDone, ...fixtureMoves];
+  const shuffled = await call({ format: "json" });
+  assert.equal(shuffled.data.waiting.items.find((w) => w.number === "1.3.1").days, 9);
+  // With nothing older to read, the card has no known start rather than a wrong one.
+  movePages = () => [doneToDone];
+  assert.equal((await call({ format: "json" })).data.waiting.items.find((w) => w.number === "1.3.1").days, null);
   movePages = () => fixtureMoves;
   mockCards = fixtureCards();
 
@@ -2264,6 +2277,9 @@ assert.equal(sawSignal.aborted, false);
     { id: "s11", name: "1.1. Checkout", idList: "L1", desc: AC },
     { id: "t1", name: "1.1.1. Merged PR", idList: "L3", attachments: pr(1) },
     { id: "t2", name: "1.1.2. Open PR", idList: "L3", attachments: pr(2) },
+    // A second card numbered 1.1.2, still in Backlog. The audit reads the first one, so its pull
+    // request must not be asked about or listed as a Done card's.
+    { id: "t2b", name: "1.1.2. Old copy", idList: "L1", attachments: pr(5) },
     { id: "t3", name: "1.1.3. Other host", idList: "L3", attachments: [{ url: "https://gitlab.com/acme/group/web/-/merge_requests/7" }] },
     { id: "t4", name: "1.1.4. No link", idList: "L3", attachments: [] },
     { id: "t5", name: "1.1.5. Missing PR", idList: "L3", attachments: pr(3) },

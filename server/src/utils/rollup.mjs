@@ -107,6 +107,8 @@ export function buildTree({ cards, lists = {}, checklists = {}, isDoneList = don
     }
     const list = lists[card.idList] ?? "(unknown list)";
     nodes.set(number, {
+      // The card this number was read from; of two cards that share a number, only the first.
+      id: card.id,
       number,
       name: card.name,
       shortLink: card.shortLink,
@@ -189,7 +191,8 @@ export const cap = (items) => ({ count: items.length, items: items.slice(0, SHOW
 export function buildReport(roots, { now = Date.now(), staleDays = 14 } = {}) {
   let done = 0;
   let total = 0;
-  const openByList = {};
+  // A Map, not {}: list names are typed by people, and one called "constructor" must count as a list.
+  const openByList = new Map();
   const blocked = [];
   const overdue = [];
   const stale = [];
@@ -212,7 +215,7 @@ export function buildReport(roots, { now = Date.now(), staleDays = 14 } = {}) {
     const isLeaf = node.children.length === 0;
     const open = !complete(node);
 
-    if (isLeaf && open) openByList[node.list] = (openByList[node.list] ?? 0) + 1;
+    if (isLeaf && open) openByList.set(node.list, (openByList.get(node.list) ?? 0) + 1);
     // Blocked and overdue are about work items. Counting a parent as well would list one
     // piece of work once per level, so a story and its tasks are not reported together.
     if (isLeaf && open && node.blocked) blocked.push({ number: node.number, name: node.name, list: node.list });
@@ -271,6 +274,6 @@ export function buildReport(roots, { now = Date.now(), staleDays = 14 } = {}) {
       storiesWithUnmetCriteria: cap(unmetCriteria),
       missingParent: cap(missingParent),
     },
-    openByList,
+    openByList: Object.fromEntries(openByList),
   };
 }

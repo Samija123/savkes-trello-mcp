@@ -10,7 +10,6 @@ import { noteBlock, warning } from "../formatters/warnings.mjs";
 import { resolveBoard, trello } from "../trello/client.mjs";
 import { DEFAULT_BURST_SIZE, buildDonePathAudit } from "../utils/donepath.mjs";
 import { checkPullRequests, pullRequestsOnCards, summarizeVerification } from "../utils/github.mjs";
-import { cardNumber } from "../utils/numbering.mjs";
 import { buildOutcomeAudit, countsAsDone, indexFacts } from "../utils/outcome.mjs";
 import { buildReport, buildTree, doneListTest, scopeTo, walk } from "../utils/rollup.mjs";
 
@@ -78,7 +77,7 @@ async function loadTree(board, doneLists, { criteria = true, extraCardFields = "
       : [],
   ]);
 
-  const checklistsByCard = {};
+  const checklistsByCard = Object.create(null);
   for (const list of checklists) (checklistsByCard[list.idCard] ??= []).push(list);
 
   const tree = buildTree({
@@ -131,9 +130,11 @@ async function loadComments(board) {
 // When each Done card became Done: card id -> ISO date. A card is Done by sitting in a Done
 // list or by a ticked due date, the same two ways buildTree counts it, so both are read in
 // one paged request. Actions come newest first, so a card's first list action (a move or its
-// creation) is where it sits now: it starts the clock only if that put it in Done. Likewise
-// the newest due-date change counts only if it ticked the date. With both, the earlier one
-// is when the card became Done. A card with neither (history out of reach) has no date.
+// creation) is where it sits now: it starts the clock only if that put it in Done. A move
+// between two Done lists (Done -> Released) is skipped, so the clock starts at the move that
+// brought the card in from outside Done, as in the done-path audit. Likewise the newest
+// due-date change counts only if it ticked the date. With both, the earlier one is when the
+// card became Done. A card with neither (history out of reach) has no date.
 async function loadDoneSince(board, doneLists, cards, listNames) {
   const isDoneList = doneListTest(doneLists);
   const intoList = new Map();
@@ -143,7 +144,8 @@ async function loadDoneSince(board, doneLists, cards, listNames) {
     if (!card?.id) return;
     if (action.type === "createCard" || action.data?.listAfter) {
       const into = action.type === "createCard" ? action.data?.list?.name : action.data.listAfter.name;
-      if (!intoList.has(card.id)) intoList.set(card.id, isDoneList(into) ? action.date : null);
+      const withinDone = isDoneList(into) && isDoneList(action.data?.listBefore?.name);
+      if (!intoList.has(card.id) && !withinDone) intoList.set(card.id, isDoneList(into) ? action.date : null);
     } else if (action.data?.old && "dueComplete" in action.data.old) {
       if (!ticked.has(card.id)) ticked.set(card.id, card.dueComplete === true ? action.date : null);
     }
@@ -314,10 +316,11 @@ export const TOOLS = {
         if (!token || /^\$\{.*\}$/.test(token)) {
           verification = { enabled: false, reason: "GITHUB_TOKEN is not set" };
         } else {
-          // The same cards the audit counts as Done, inside the same epic scope.
+          // The same cards the audit counts as Done, inside the same epic scope. Matched by card,
+          // not by number, so a second card that shares a Done card's number is left out.
           const done = new Set();
-          walk(roots, (node) => countsAsDone(node) && done.add(node.number));
-          const doneCards = cards.filter((c) => done.has(cardNumber(c.name)));
+          walk(roots, (node) => countsAsDone(node) && done.add(node.id));
+          const doneCards = cards.filter((c) => done.has(c.id));
           const found = pullRequestsOnCards(doneCards);
           verification = summarizeVerification(found, await checkPullRequests(found.prs, { token }));
         }
