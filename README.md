@@ -99,7 +99,9 @@ Each layer has one job, and each job lives in one layer:
 | `server/src/index.mjs` | Speak MCP: frame lines, route methods, validate args, wrap results | MCP, but not Trello |
 | `server/src/tools/*.mjs` | Define tools as plain objects `{ description, inputSchema, annotations, run }` | Trello endpoints, but not MCP framing |
 | `server/src/trello/client.mjs` | One `trello(method, path, params)` function for every HTTP call | HTTP, but not tools |
-| `server/src/utils/numbering.mjs` | Card-number parsing and placement maths | Nothing (pure functions) |
+| `server/src/utils/*.mjs` | Card-number parsing, placement maths, and the numbers behind the report tools | Nothing (pure functions), except `github.mjs`, which asks api.github.com whether a pull request was merged |
+| `server/src/formatters/*.mjs` | Turn those numbers into the markdown the report tools return, plus the notes they end with | Markdown, but not Trello |
+| `server/src/errors.mjs` | Every failure the report tools can produce: a `ToolError` with a stable `code` and a hint, and the GitHub check's "unverified" results | Nothing |
 | `server/src/resources.mjs`, `prompts.mjs` | The other two MCP primitives | — |
 | `server/src/index.test.mjs` | Protocol + tool tests with a mocked `fetch` | — |
 

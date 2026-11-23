@@ -1,17 +1,17 @@
 // Does "Done" have anything behind it? Pure, like rollup.mjs: cards, checklists and
-// comments in, plain data and strings out, no network.
+// comments in, plain data out, no network. formatters/outcome.mjs writes it up.
 //
 // Trello can only say that a card sits in a Done list. This reads what the card itself
 // carries, and nothing outside Trello: a pull-request link, a comment saying it was
 // deployed, a Definition of Done checklist that is fully ticked. It cannot tell whether
 // the pull request was merged, only that someone attached one. Asking GitHub about the merge
-// is the optional step in utils/github.mjs; this file only prints what it found.
+// is the optional step in utils/github.mjs.
 //
 // Nothing here scores or names a person. A card has a member count and a comment, and
 // both are reduced to a yes/no before anything leaves this file.
 
 import { cardNumber } from "./numbering.mjs";
-import { DAY_MS, bar, cap, mdText, more, percentOf, tierOf, walk, depthOf } from "./rollup.mjs";
+import { DAY_MS, cap, depthOf, percentOf, tierOf, walk } from "./rollup.mjs";
 
 // The team rule, in one place and in these words, so every audit reads it the same way.
 // Printed with every result: a reader never has to guess which rule produced the list.
@@ -28,23 +28,10 @@ export const EVIDENCE = Object.freeze([
   Object.freeze({ id: "definition-of-done", text: "a Definition of Done checklist with every item ticked" }),
 ]);
 
-// --- Reading one card --------------------------------------------------------
-
 // GitHub /pull/12 (and the API's /pulls/12), GitLab /merge_requests/7, Bitbucket
 // /pull-requests/3, Azure DevOps /pullrequest/9. Only the path is read, so a PR on a
 // self-hosted server counts, and an issue, a commit or a bare /pull/ list does not.
 const PR_PATH = /\/(?:pulls?|pull-requests|pullrequest|merge_requests)\/\d+(?:\/|$)/i;
-
-export function hasPullRequest(attachments) {
-  return (attachments ?? []).some((attachment) => {
-    try {
-      const url = new URL(String(attachment?.url ?? ""));
-      return /^https?:$/.test(url.protocol) && PR_PATH.test(url.pathname);
-    } catch {
-      return false;
-    }
-  });
-}
 
 // "deployed" as a word ("undeployed" is not it). A sentence that denies, defers or asks
 // about it is not proof, so any of these in the same sentence reads as no. That is
@@ -62,6 +49,23 @@ const UNDONE = /\b(?:rolled[ -]?back|roll(?:ed)?back|reverted|undeployed|unrelea
 
 // A full stop after these is not the end of a sentence ("Acme Inc. replied").
 const ABBREVIATION = /\b(?:inc|ltd|llc|co|corp|dr|mr|mrs|ms|st|vs|etc|jr|sr|approx|e\.g|i\.e)\.$/i;
+
+// A checklist named like this is a Definition of Done.
+const DOD_NAME = /\b(?:definition of done|dod)\b/i;
+
+// --- Reading one card --------------------------------------------------------
+
+export function hasPullRequest(attachments) {
+  return (attachments ?? []).some((attachment) => {
+    try {
+      const url = new URL(String(attachment?.url ?? ""));
+      return /^https?:$/.test(url.protocol) && PR_PATH.test(url.pathname);
+    } catch {
+      return false;
+    }
+  });
+}
+
 const sentences = (text) => {
   const parts = [];
   for (const line of String(text ?? "").split(/\n+/)) {
@@ -80,7 +84,7 @@ const sentences = (text) => {
 // me if anything breaks" is, because the "if" belongs to a later clause.
 const upToDeployClause = (s) => {
   const at = s.search(DEPLOYED);
-  const end = s.slice(at).search(/[,;:\u2013\u2014]|\s-\s/);
+  const end = s.slice(at).search(/[,;:–—]|\s-\s/);
   return end === -1 ? s : s.slice(0, at + end);
 };
 const isDeployedSentence = (s) => {
@@ -112,8 +116,6 @@ export function hasDeployedProof(comments) {
 // Every Definition of Done checklist on the card must be fully ticked, and there must be
 // at least one with items. An item with no `state` (data that was not asked for it) is not
 // a tick: for evidence, unknown means no, the opposite of how open criteria are counted.
-const DOD_NAME = /\b(?:definition of done|dod)\b/i;
-
 export function hasTickedDod(checklists) {
   const lists = (checklists ?? []).filter((c) => DOD_NAME.test(c.name ?? ""));
   return (
@@ -161,8 +163,9 @@ const hasEvidence = (f) => Boolean(f && (f.pullRequest || f.deployedComment || f
 
 // --- The audit ----------------------------------------------------------------
 
-// A card counts as Done here when it is a finished work item, or a story whose work items are
-// all finished. The GitHub check in reports.mjs asks about the same cards.
+// A card counts as Done here when it is a finished work item, or a story whose work items
+// are all finished: criteria are written on stories, so that is where they get ticked. The
+// GitHub check in reports.mjs asks about the same cards.
 export const countsAsDone = (node) => (node.children.length === 0 ? node.isDone : depthOf(node) === 2 && node.done === node.total);
 
 // `roots` as scopeTo returns them; `facts` as indexFacts returns them. `exemptLabels` names
@@ -213,19 +216,16 @@ export function buildOutcomeAudit(roots, facts, { exemptLabels = [], now = Date.
       unprovenSignOff.push({ number: node.number, name: node.name, workItems: node.total });
     }
 
-    // A card counts as Done here when it is a finished work item, or a story whose work
-    // items are all finished: criteria are written on stories, so that is where they get ticked.
-    const finished = countsAsDone(node);
     if (isLeaf && node.isDone && !f?.pullRequest && !isExempt(f)) noPullRequest.push({ number: node.number, name: node.name });
-    // Done by its ticked due date (or Done list) and Blocked at the same time: one of the two
-    // is out of date. Said out loud, not resolved, because the status report counts it as Done.
     // Done, but nothing on the card shows it: how long has it been like that?
     if (isLeaf && node.isDone && !hasEvidence(f)) {
       const since = Date.parse(f?.doneSince);
       waiting.push({ number: node.number, name: node.name, days: Number.isNaN(since) ? null : Math.max(0, Math.floor((now - since) / DAY_MS)) });
     }
+    // Done by its ticked due date (or Done list) and Blocked at the same time: one of the two
+    // is out of date. Said out loud, not resolved, because the status report counts it as Done.
     if (isLeaf && node.isDone && node.blocked) blockedButDone.push({ number: node.number, name: node.name });
-    if (finished && node.criteriaOpen > 0) {
+    if (countsAsDone(node) && node.criteriaOpen > 0) {
       openCriteria.push({ number: node.number, name: node.name, open: node.criteriaOpen });
     }
 
@@ -272,125 +272,4 @@ export function buildOutcomeAudit(roots, facts, { exemptLabels = [], now = Date.
     rule: TEAM_RULE,
     evidence: EVIDENCE,
   };
-}
-
-// --- The write-up -------------------------------------------------------------
-
-// The GitHub part of the write-up, from summarizeVerification (utils/github.mjs), or the plain
-// statement that it was asked for and could not run. Counts and card names only.
-function renderVerification(v) {
-  if (!v.enabled) return [`Not checked: ${v.reason}.`];
-  const { merged, open, closed, unverified, notChecked } = v.pullRequests;
-  const total = merged + open + closed + unverified + notChecked;
-  const lines = total
-    ? [
-        `${merged} of ${total} linked pull ${total === 1 ? "request is" : "requests are"} merged, according to GitHub. ` +
-          `${open} open, ${closed} closed without a merge, ${unverified} could not be verified${notChecked ? `, ${notChecked} not asked about (over the limit)` : ""}.`,
-      ]
-    : ["No Done card links a GitHub pull request, so GitHub was not asked."];
-  const { withGitHubPr, noneMerged } = v.cards;
-  const shown = { open: "open", closed: "closed, not merged", unverified: "could not verify", notChecked: "not asked, over the limit" };
-  if (noneMerged.count) {
-    lines.push(
-      `- None merged on ${noneMerged.count} ${noneMerged.count === 1 ? "card" : "cards"}: ` +
-        `${noneMerged.items.map((c) => `${mdText(c.name)} (${shown[c.state]})`).join("; ")}${more(noneMerged)}.`,
-    );
-  } else if (withGitHubPr) {
-    lines.push("- Every Done card with a GitHub pull request has at least one that is merged.");
-  }
-  if (v.otherHost) {
-    lines.push(`- ${v.otherHost} Done ${v.otherHost === 1 ? "card links" : "cards link"} to a host other than GitHub, so ${v.otherHost === 1 ? "it was" : "they were"} not checked.`);
-  }
-  if (total) lines.push("_GitHub says whether a pull request was merged. It does not say the work matches the card, was reviewed, or passed checks._");
-  return lines;
-}
-
-// True when GitHub was actually asked about at least one pull request.
-const askedGitHub = (v) => Boolean(v?.enabled && v.pullRequests.merged + v.pullRequests.open + v.pullRequests.closed + v.pullRequests.unverified);
-
-export function renderOutcomeAudit(boardName, audit, { now = Date.now(), verification } = {}) {
-  const { progress, provenDone, items, unprovenSignOff, waiting, ruleBreaks, inconsistent, missingParent, exemptLabels, rule, evidence } = audit;
-  const out = [`# Outcome audit: ${boardName}`, `_${new Date(now).toISOString().slice(0, 10)}_`, ""];
-
-  const sit = progress.total === 1 ? "item sits" : "items sit";
-  const shows = provenDone.done === 1 ? "shows" : "show";
-  out.push(
-    `**${progress.percent}% in Done. ${provenDone.percent}% with evidence.** ` +
-      `${progress.done} of ${progress.total} work ${sit} in Done; ${provenDone.done} of them ${shows} evidence.` +
-      (missingParent
-        ? ` The totals include ${missingParent} ${missingParent === 1 ? "card" : "cards"} whose parent is missing, ${missingParent === 1 ? "which is not a row" : "which are not rows"} of the table.`
-        : ""),
-    "",
-    "## Progress",
-    "| | In Done | With evidence |",
-    "|---|---|---|",
-    ...items.map(
-      (i) => `| ${mdText(i.name)} | ${bar(i.percent)} ${i.percent}% | ${bar(i.provenPercent)} ${i.provenPercent}% |`,
-    ),
-    "",
-    "## Sign-off without evidence",
-  );
-  if (unprovenSignOff.count) {
-    out.push(
-      ...unprovenSignOff.items.map(
-        (s) =>
-          `- **${mdText(s.name)}**: ` +
-          (s.workItems === 1 ? "its only work item is Done, with no evidence" : `all ${s.workItems} work items are Done, none shows evidence`),
-      ),
-    );
-    if (unprovenSignOff.count > unprovenSignOff.items.length) out.push(`- …${more(unprovenSignOff).trim()}`);
-  } else {
-    out.push("No story is waiting for sign-off without evidence.");
-  }
-  out.push("");
-
-  out.push("## Done without evidence, longest waiting");
-  if (waiting.count) {
-    out.push(
-      ...waiting.items.map(
-        (w) => `- **${mdText(w.name)}**: ` + (w.days === null ? "no date found for when it became Done" : w.days === 0 ? "moved to Done today" : `${w.days} ${w.days === 1 ? "day" : "days"} in Done`),
-      ),
-    );
-    if (waiting.count > waiting.items.length) out.push(`- …${more(waiting).trim()}`);
-  } else {
-    out.push("Every Done card shows evidence.");
-  }
-  out.push("");
-
-  const lines = [];
-  const add = (label, group, describe) => {
-    if (!group.count) return;
-    lines.push(`- **${label} (${group.count}):** ${group.items.map(describe).join("; ")}${more(group)}`);
-  };
-  add("Done without a pull request", ruleBreaks.doneWithoutPullRequest, (c) => mdText(c.name));
-  add("Done with acceptance criteria not ticked", ruleBreaks.doneWithOpenCriteria, (c) => `${mdText(c.name)}, ${c.open} open`);
-  add("Blocked without exactly one member and one sentence", ruleBreaks.blockedIncomplete, (c) => `${mdText(c.name)} (${c.problems.join(", ")})`);
-  out.push("## Where the team rule is not met", ...(lines.length ? lines : ["Every card follows the rule."]), "");
-
-  // Not a rule break: the board contradicts itself, and the numbers above follow the status report.
-  if (inconsistent.doneAndBlocked.count) {
-    out.push(
-      "## Cards that say two things",
-      `- **Counted as Done but also Blocked (${inconsistent.doneAndBlocked.count}):** ${inconsistent.doneAndBlocked.items
-        .map((c) => mdText(c.name))
-        .join("; ")}${more(inconsistent.doneAndBlocked)}. Their due date is ticked complete or they sit in a Done list; one of the two is out of date.`,
-      "",
-    );
-  }
-
-  if (verification) out.push("## Pull requests on GitHub", ...renderVerification(verification), "");
-
-  out.push(
-    "## The rule",
-    ...rule.map((r) => `- ${r.text}`),
-    ...(exemptLabels.length ? [`- Cards labelled ${exemptLabels.map(mdText).join(", ")} are not asked for a pull request.`] : []),
-    "",
-    "## What counts as evidence",
-    ...evidence.map((e) => `- ${e.text}`),
-    askedGitHub(verification)
-      ? "_Trello and GitHub were read: a pull request on a Done card was asked about, the other evidence comes from the card._"
-      : "_Only Trello is read: an attached pull request is seen, not checked for a merge._",
-  );
-
-  return out.join("\n").trimEnd();
 }

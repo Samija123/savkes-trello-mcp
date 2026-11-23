@@ -1,77 +1,103 @@
-// Read-only views over the numbered hierarchy: a client-ready status report and a
-// board map. The arithmetic and the rendering live in utils/rollup.mjs; this file only
-// fetches the board and maps tool arguments onto it.
+// Read-only views over the board: a client-ready status report, a board map, and two audits
+// of what "Done" means. The numbers are worked out in utils/, the text is written in
+// formatters/; this file only fetches the board and maps tool arguments onto it.
 
+import { invalidArgument, noNumberedCards } from "../errors.mjs";
+import { renderDonePathAudit } from "../formatters/donepath.mjs";
+import { renderOutcomeAudit } from "../formatters/outcome.mjs";
+import { renderMermaid, renderOutline, renderReport } from "../formatters/rollup.mjs";
+import { noteBlock, warning } from "../formatters/warnings.mjs";
 import { resolveBoard, trello } from "../trello/client.mjs";
-import { buildDonePathAudit, renderDonePathAudit } from "../utils/donepath.mjs";
+import { DEFAULT_BURST_SIZE, buildDonePathAudit } from "../utils/donepath.mjs";
 import { checkPullRequests, pullRequestsOnCards, summarizeVerification } from "../utils/github.mjs";
 import { cardNumber } from "../utils/numbering.mjs";
-import { buildOutcomeAudit, countsAsDone, indexFacts, renderOutcomeAudit } from "../utils/outcome.mjs";
-import {
-  buildReport,
-  buildTree,
-  doneListTest,
-  renderMermaid,
-  renderOutline,
-  renderReport,
-  scopeTo,
-  walk,
-} from "../utils/rollup.mjs";
+import { buildOutcomeAudit, countsAsDone, indexFacts } from "../utils/outcome.mjs";
+import { buildReport, buildTree, doneListTest, scopeTo, walk } from "../utils/rollup.mjs";
 
+// One request reads every card. If Trello returns exactly this many it may have stopped
+// there, and the report says so instead of presenting partial numbers as the whole board.
 const CARD_READ_LIMIT = 1000;
+
+// Board history is read in whole pages of Trello's maximum size, and capped: a board with
+// endless history must not turn one call into an endless loop. When the cap is hit the
+// report says so, since a "deployed" comment or a move into Done further back is then missed.
+const ACTION_PAGE = 1000;
+const ACTION_PAGES = 10;
+const ACTIONS_READ = ACTION_PAGE * ACTION_PAGES;
+
+const REPORT_FORMATS = ["markdown", "json"];
+
+// Schema pieces several tools share, so the same argument is described the same way everywhere.
+const boardProp = { type: "string", description: "Board to read; defaults to TRELLO_BOARD_ID" };
+const epicProp = {
+  type: "string",
+  description: 'Limit to one card\'s subtree by hierarchy number, e.g. "2" or "2.1". Omit for the whole board',
+};
+const reportFormatProp = {
+  type: "string",
+  description: '"markdown" (default; ready to paste into an update) or "json"',
+};
+const doneListsProp = {
+  type: "array",
+  items: { type: "string" },
+  description:
+    'Exact names of the lists that hold finished work, e.g. ["Shipped"]. Default: any list whose name starts with Done, Complete, Completed, Shipped, Released, Closed or Finished',
+};
+
+// Every request here is under one board, so its path is spelled in one place.
+const boardPath = (board, endpoint) => (endpoint ? `/boards/${board}/${endpoint}` : `/boards/${board}`);
+
+const oneOf = (name, value, allowed) => {
+  if (!allowed.includes(value)) throw invalidArgument(name, `one of ${allowed.map((a) => `"${a}"`).join(", ")}`, value);
+};
+
+// The board's name, and its list names by id. filter=all, so a card is never shown under
+// "(unknown list)" because its list was archived.
+async function loadBoard(board) {
+  const [info, lists] = await Promise.all([
+    trello("GET", boardPath(board), { fields: "name" }),
+    trello("GET", boardPath(board, "lists"), { fields: "name", filter: "all" }),
+  ]);
+  return { name: info.name, listNames: Object.fromEntries(lists.map((l) => [l.id, l.name])) };
+}
 
 // Reads in parallel. Descriptions and checklists are only needed to count acceptance
 // criteria, so the board map (criteria: false) skips both; the report reads them and
 // returns counts, never the text. `extraCardFields` and `extraCardParams` let the outcome
 // audit ask for members and attachments on the same single cards request.
 async function loadTree(board, doneLists, { criteria = true, extraCardFields = "", extraCardParams = {} } = {}) {
-  const [info, lists, cards, checklists] = await Promise.all([
-    trello("GET", `/boards/${board}`, { fields: "name" }),
-    // filter=all, so a card is never shown under "(unknown list)" because its list was archived.
-    trello("GET", `/boards/${board}/lists`, { fields: "name", filter: "all" }),
+  const [{ name, listNames }, cards, checklists] = await Promise.all([
+    loadBoard(board),
     // Trello's default "visible" filter already leaves archived cards out.
-    trello("GET", `/boards/${board}/cards`, {
+    trello("GET", boardPath(board, "cards"), {
       fields: `name,shortLink,idList,due,dueComplete,dateLastActivity,labels${criteria ? ",desc" : ""}${extraCardFields ? `,${extraCardFields}` : ""}`,
       ...extraCardParams,
     }),
     criteria
-      ? trello("GET", `/boards/${board}/checklists`, { fields: "name,idCard", checkItem_fields: "name,state" })
+      ? trello("GET", boardPath(board, "checklists"), { fields: "name,idCard", checkItem_fields: "name,state" })
       : [],
   ]);
 
   const checklistsByCard = {};
   for (const list of checklists) (checklistsByCard[list.idCard] ??= []).push(list);
 
-  const listNames = Object.fromEntries(lists.map((l) => [l.id, l.name]));
   const tree = buildTree({
     cards,
     lists: listNames,
     checklists: checklistsByCard,
     isDoneList: doneListTest(doneLists),
   });
-  if (!tree.roots.length) {
-    throw new Error(
-      `No numbered cards on this board (${cards.length} cards, none named like "EPIC 1. …", ` +
-        '"1.1. …" or "1.1.1. …"). These tools read that numbering; run auditCardHierarchy or ' +
-        "findCards to see what the cards are called.",
-    );
-  }
-  return { name: info.name, tree, cardCount: cards.length, cards, checklistsByCard, listNames };
+  if (!tree.roots.length) throw noNumberedCards(cards.length);
+  return { name, tree, cardCount: cards.length, cards, checklistsByCard, listNames };
 }
 
-// Board actions of one kind, newest first, in whole pages of Trello's maximum size, each
-// page continuing `before` the oldest action of the last; `onAction` sees every action.
-// Capped, because a board with endless history must not turn one call into an endless loop;
-// when the cap is hit the caller is told, since a "deployed" comment or a move into Done
-// further back would then be missed.
-const ACTION_PAGE = 1000;
-const ACTION_PAGES = 10;
-
+// Board actions of one kind, newest first, each page continuing `before` the oldest action
+// of the last; `onAction` sees every action.
 async function loadActions(board, filter, onAction) {
   let before;
   let firstId;
   for (let pages = 1; ; pages++) {
-    const page = await trello("GET", `/boards/${board}/actions`, {
+    const page = await trello("GET", boardPath(board, "actions"), {
       filter,
       limit: ACTION_PAGE,
       // No `fields` filter: paging continues from each action's `id`, so it must always be there.
@@ -152,35 +178,14 @@ async function loadListMoves(board) {
 const boardWarnings = (tree, cardCount) => ({
   duplicateNumbers: tree.duplicates.length,
   orphans: [...tree.nodes.values()].filter((n) => n.orphan).length,
-  // One request reads every card. If Trello returned exactly this many it may have
-  // stopped there, so say so instead of presenting partial numbers as the whole board.
   possiblyTruncated: cardCount >= CARD_READ_LIMIT,
 });
 
-const boardNotes = (warnings, cardCount) => {
-  const notes = [];
-  if (warnings.duplicateNumbers || warnings.orphans) {
-    notes.push(`${warnings.duplicateNumbers} duplicate and ${warnings.orphans} orphaned card numbers on the board; run auditCardHierarchy.`);
-  }
-  if (warnings.possiblyTruncated) {
-    notes.push(`the board returned ${cardCount} cards, which may be Trello's limit for one request, so this report may be partial.`);
-  }
-  return notes;
-};
-
-const noteBlock = (notes) => (notes.length ? `\n\n${notes.map((n) => `_Note: ${n}_`).join("\n")}` : "");
-
-const oneOf = (name, value, allowed) => {
-  if (!allowed.includes(value)) {
-    throw new Error(`${name} must be one of ${allowed.map((a) => `"${a}"`).join(", ")}, got "${value}"`);
-  }
-};
-
-const boardProp = { type: "string", description: "Board to read; defaults to TRELLO_BOARD_ID" };
-const epicProp = {
-  type: "string",
-  description: 'Limit to one card\'s subtree by hierarchy number, e.g. "2" or "2.1". Omit for the whole board',
-};
+const boardNotes = (warnings, cardCount) =>
+  [
+    (warnings.duplicateNumbers || warnings.orphans) && warning("numberingDrift", warnings),
+    warnings.possiblyTruncated && warning("cardsTruncated", { cardCount }),
+  ].filter(Boolean);
 
 export const TOOLS = {
   getStatusReport: {
@@ -203,24 +208,17 @@ export const TOOLS = {
       properties: {
         boardId: boardProp,
         epic: epicProp,
-        format: {
-          type: "string",
-          description: '"markdown" (default; ready to paste into an update) or "json"',
-        },
+        format: reportFormatProp,
         staleDays: {
           type: "number",
           description: "Days without activity before an open work item is called idle (default: 14)",
         },
-        doneLists: {
-          type: "array",
-          items: { type: "string" },
-          description: "Exact names of the lists that hold finished work, e.g. [\"Shipped\"]. Default: Done, Completed, Shipped, Released, Closed",
-        },
+        doneLists: doneListsProp,
       },
     },
     async run({ boardId, epic, format = "markdown", staleDays = 14, doneLists } = {}) {
-      oneOf("format", format, ["markdown", "json"]);
-      if (!(staleDays > 0)) throw new Error(`staleDays must be a positive number, got ${staleDays}`);
+      oneOf("format", format, REPORT_FORMATS);
+      if (!(staleDays > 0)) throw invalidArgument("staleDays", "a positive number", staleDays);
       const board = resolveBoard(boardId);
       const { name, tree, cardCount } = await loadTree(board, doneLists);
       const now = Date.now();
@@ -266,15 +264,8 @@ export const TOOLS = {
       properties: {
         boardId: boardProp,
         epic: epicProp,
-        format: {
-          type: "string",
-          description: '"markdown" (default; ready to paste into an update) or "json"',
-        },
-        doneLists: {
-          type: "array",
-          items: { type: "string" },
-          description: "Exact names of the lists that hold finished work, e.g. [\"Shipped\"]. Default: Done, Completed, Shipped, Released, Closed",
-        },
+        format: reportFormatProp,
+        doneLists: doneListsProp,
         exemptLabels: {
           type: "array",
           items: { type: "string" },
@@ -289,7 +280,7 @@ export const TOOLS = {
       },
     },
     async run({ boardId, epic, format = "markdown", doneLists, exemptLabels = [], verifyPullRequests = false } = {}) {
-      oneOf("format", format, ["markdown", "json"]);
+      oneOf("format", format, REPORT_FORMATS);
       const board = resolveBoard(boardId);
       // Comments come from their own paged request; everything else is the same four reads
       // the status report makes, plus members and attachment links on the cards.
@@ -332,17 +323,11 @@ export const TOOLS = {
         }
       }
       if (format === "json") return { boardId: board, board: name, format, ...result, ...(verification ? { verification } : {}), warnings };
-      const notes = boardNotes(warnings, cardCount);
-      if (warnings.commentsPossiblyTruncated) {
-        notes.push(
-          `the board has more comments than were read (${ACTION_PAGES * ACTION_PAGE}), so a "deployed" comment or a Blocked reason further back may be missed; the numbers above may be incomplete.`,
-        );
-      }
-      if (warnings.movesPossiblyTruncated) {
-        notes.push(
-          `the board has more card moves and due-date changes than were read (${ACTION_PAGES * ACTION_PAGE}), so some waiting times may be missing.`,
-        );
-      }
+      const notes = [
+        ...boardNotes(warnings, cardCount),
+        warnings.commentsPossiblyTruncated && warning("commentsTruncated", { read: ACTIONS_READ }),
+        warnings.movesPossiblyTruncated && warning("doneDatesTruncated", { read: ACTIONS_READ }),
+      ].filter(Boolean);
       return {
         boardId: board,
         board: name,
@@ -367,12 +352,8 @@ export const TOOLS = {
       type: "object",
       properties: {
         boardId: boardProp,
-        format: { type: "string", description: '"markdown" (default) or "json"' },
-        doneLists: {
-          type: "array",
-          items: { type: "string" },
-          description: "Exact names of the lists that hold finished work. Default: Done, Completed, Shipped, Released, Closed",
-        },
+        format: reportFormatProp,
+        doneLists: doneListsProp,
         progressLists: {
           type: "array",
           items: { type: "string" },
@@ -385,23 +366,19 @@ export const TOOLS = {
         },
         burstSize: {
           type: "integer",
-          description: "How many cards moved into Done together make a batch (default: 5)",
+          description: `How many cards moved into Done together make a batch (default: ${DEFAULT_BURST_SIZE})`,
         },
       },
     },
-    async run({ boardId, format = "markdown", doneLists, progressLists, reviewLists, burstSize = 5 } = {}) {
-      oneOf("format", format, ["markdown", "json"]);
-      if (!Number.isInteger(burstSize) || burstSize < 2) {
-        throw new Error(`burstSize must be a whole number of 2 or more, got ${burstSize}`);
-      }
+    async run({ boardId, format = "markdown", doneLists, progressLists, reviewLists, burstSize = DEFAULT_BURST_SIZE } = {}) {
+      oneOf("format", format, REPORT_FORMATS);
+      if (!Number.isInteger(burstSize) || burstSize < 2) throw invalidArgument("burstSize", "a whole number of 2 or more", burstSize);
       const board = resolveBoard(boardId);
-      const [info, lists, cards, moves] = await Promise.all([
-        trello("GET", `/boards/${board}`, { fields: "name" }),
-        trello("GET", `/boards/${board}/lists`, { fields: "name", filter: "all" }),
-        trello("GET", `/boards/${board}/cards`, { fields: "name,idList,idMembers" }),
+      const [{ name, listNames }, cards, moves] = await Promise.all([
+        loadBoard(board),
+        trello("GET", boardPath(board, "cards"), { fields: "name,idList,idMembers" }),
         loadListMoves(board),
       ]);
-      const listNames = Object.fromEntries(lists.map((l) => [l.id, l.name]));
       const audit = buildDonePathAudit({
         cards: cards.map((c) => ({ id: c.id, name: c.name, listName: listNames[c.idList], idMembers: c.idMembers })),
         events: moves.events,
@@ -411,15 +388,13 @@ export const TOOLS = {
         burstSize,
       });
       const warnings = { movesPossiblyTruncated: moves.truncated };
-      if (format === "json") return { boardId: board, board: info.name, format, ...audit, warnings };
-      const notes = moves.truncated
-        ? [`the board has more card moves than were read (${ACTION_PAGES * ACTION_PAGE}), so some cards may look as if they skipped a stage.`]
-        : [];
+      if (format === "json") return { boardId: board, board: name, format, ...audit, warnings };
+      const notes = moves.truncated ? [warning("pathsTruncated", { read: ACTIONS_READ })] : [];
       return {
         boardId: board,
-        board: info.name,
+        board: name,
         format,
-        report: renderDonePathAudit(info.name, audit) + noteBlock(notes),
+        report: renderDonePathAudit(name, audit) + noteBlock(notes),
       };
     },
   },
@@ -445,16 +420,12 @@ export const TOOLS = {
           type: "number",
           description: "Deepest level to draw: 1 epics, 2 stories, 3 tasks (default: 3)",
         },
-        doneLists: {
-          type: "array",
-          items: { type: "string" },
-          description: "Exact names of the lists that hold finished work. Default: Done, Completed, Shipped, Released, Closed",
-        },
+        doneLists: doneListsProp,
       },
     },
     async run({ boardId, epic, format = "outline", depth = 3, doneLists } = {}) {
       oneOf("format", format, ["outline", "mermaid"]);
-      if (!Number.isInteger(depth) || depth < 1) throw new Error(`depth must be a whole number of 1 or more, got ${depth}`);
+      if (!Number.isInteger(depth) || depth < 1) throw invalidArgument("depth", "a whole number of 1 or more", depth);
       const board = resolveBoard(boardId);
       const { name, tree } = await loadTree(board, doneLists, { criteria: false });
       const roots = scopeTo(tree, epic);

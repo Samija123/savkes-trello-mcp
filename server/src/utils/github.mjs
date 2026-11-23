@@ -6,6 +6,7 @@
 // point the token somewhere else. The token goes in one header and nowhere else: no
 // result, reason or error carries it, even when the failure message did.
 
+import { GITHUB_UNVERIFIED, githubFailure, githubTokenMissing } from "../errors.mjs";
 import { pool } from "../trello/client.mjs";
 import { hasPullRequest } from "./outcome.mjs";
 import { cap } from "./rollup.mjs";
@@ -13,6 +14,10 @@ import { cap } from "./rollup.mjs";
 const API = "https://api.github.com";
 const NAME = /^[A-Za-z0-9_.-]+$/;
 const PULL = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
+// At most this many pull requests are asked about per audit, this many at a time.
+const CHECK_LIMIT = 100;
+const CONCURRENCY = 5;
+const TIMEOUT_MS = 10_000;
 
 // https://github.com/acme/web/pull/42 (also /files, /commits ...) -> { owner, repo, number }.
 // Anything else, including another host that merely contains "github.com", is null.
@@ -35,11 +40,10 @@ export function parseGitHubPr(url) {
 }
 
 const keyOf = ({ owner, repo, number }) => `${owner}/${repo}#${number}`;
-const unverified = (reason, category, retryable) => ({ state: "unverified", reason, category, retryable });
 
-// Every failure is reported as "unverified" with a category and whether trying again could
-// help; none is reported as merged or as not merged. One unreachable link must not fail the
-// whole audit, which is why this does not throw.
+// Every failure is one of GITHUB_UNVERIFIED (errors.mjs): reported, never read as merged or
+// as not merged. One unreachable link must not fail the whole audit, which is why this does
+// not throw.
 async function checkOne({ owner, repo, number }, { token, fetchImpl, timeoutMs }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -55,25 +59,23 @@ async function checkOne({ owner, repo, number }, { token, fetchImpl, timeoutMs }
     });
     // Anything but a 200 is answered from the status alone; its body is released, not left
     // holding the connection.
-    if (res.status !== 200) await res.body?.cancel();
-    if (res.status === 404) return unverified("not found or no access", "permission", false);
-    if (res.status === 401 || res.status === 403) return unverified("refused by GitHub", "permission", false);
-    if (res.status === 429) return unverified("rate limited", "transient", true);
-    if (res.status >= 500) return unverified("GitHub error", "transient", true);
-    if (res.status !== 200) return unverified("unexpected reply", "validation", false);
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      return githubFailure(res.status);
+    }
     let body;
     try {
       body = await res.json();
     } catch {
       // Cut off by the timeout is a network problem; a body that is not JSON is not.
       if (controller.signal.aborted) throw new Error("timed out");
-      return unverified("unexpected reply", "validation", false);
+      return GITHUB_UNVERIFIED.unexpectedReply;
     }
-    if (typeof body?.merged !== "boolean") return unverified("unexpected reply", "validation", false);
+    if (typeof body?.merged !== "boolean") return GITHUB_UNVERIFIED.unexpectedReply;
     if (body.merged) return { state: "merged" };
     return { state: body.state === "open" ? "open" : "closed" };
   } catch {
-    return unverified("could not reach GitHub", "transient", true);
+    return GITHUB_UNVERIFIED.unreachable;
   } finally {
     clearTimeout(timer);
   }
@@ -124,10 +126,10 @@ export function summarizeVerification({ perCard, otherHost }, { results, notChec
 // `prs`: [{ owner, repo, number }] as parseGitHubPr returns them. Returns
 // { results: Map("owner/repo#n" -> { state: "merged" | "open" | "closed" | "unverified", ... }), notChecked }.
 // A link repeated on several cards is asked about once; links beyond `limit` are counted, not asked.
-export async function checkPullRequests(prs, { token, fetchImpl = fetch, limit = 100, timeoutMs = 10_000 } = {}) {
-  if (!token) throw new Error("A GitHub token is required to check pull requests");
+export async function checkPullRequests(prs, { token, fetchImpl = fetch, limit = CHECK_LIMIT, timeoutMs = TIMEOUT_MS } = {}) {
+  if (!token) throw githubTokenMissing();
   const unique = [...new Map(prs.map((p) => [keyOf(p), p])).values()];
   const asked = unique.slice(0, limit);
-  const answers = await pool(asked, 5, (pr) => checkOne(pr, { token, fetchImpl, timeoutMs }));
+  const answers = await pool(asked, CONCURRENCY, (pr) => checkOne(pr, { token, fetchImpl, timeoutMs }));
   return { results: new Map(asked.map((pr, i) => [keyOf(pr), answers[i]])), notChecked: unique.length - asked.length };
 }

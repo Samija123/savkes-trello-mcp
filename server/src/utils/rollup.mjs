@@ -1,17 +1,17 @@
-// Roll the numbered card hierarchy up into progress and attention items, and render
-// the two views built from them: a client-ready status report and a board map.
+// Roll the numbered card hierarchy up into progress and attention items: the numbers behind
+// the status report and the board map. formatters/rollup.mjs turns them into text.
 //
-// Pure, like numbering.mjs: cards in, plain data and strings out. No network and no MCP
-// framing, so the selftest covers all of it without credentials.
+// Pure, like numbering.mjs: cards in, plain data out. No network and no MCP framing, so the
+// selftest covers all of it without credentials.
 //
 // The idea is that Trello has no epics and no roll-up, but this board's card names
 // already carry the tree ("EPIC 1" -> "1.1" -> "1.1.2"). A work item is a card with no
 // children, and every number above it is computed from those, never guessed.
 
+import { unknownCardNumber } from "../errors.mjs";
 import { cardNumber, parentNumber } from "./numbering.mjs";
 
 export const DAY_MS = 86_400_000;
-const BAR_WIDTH = 10;
 // Lists in the report are capped so a board with 80 idle cards doesn't turn the
 // write-up into a wall of text. The count always covers every card; only the names stop.
 const SHOWN = 10;
@@ -25,6 +25,21 @@ const DONE_LIST = /^(done|completed?|shipped|released|closed|finished)\b/i;
 const BLOCKED_LABEL = /^block(?:ed|er|ing)?\b/i;
 // A list named Blocked is the other common way to park a card, so it counts too.
 const BLOCKED_LIST = /^blocked\b/i;
+
+// Acceptance criteria live in the card description as Given/When/Then bullets, one
+// "Given" per criterion, usually all on one line. A line only counts when When and Then
+// follow before the next Given, so a sentence that merely starts with "Given" doesn't.
+// Cards written during the window when the push skill made AC a real checklist keep
+// them there instead, so a checklist named "Acceptance Criteria" counts too. Without
+// that, every older story would read as having none.
+const GIVEN_START = /^[ \t]*(?:[-*][ \t]+)?\**Given\b/i;
+
+// What a card is, by depth. Used so a report scoped to a story calls it a story.
+const TIERS = [
+  ["epic", "epics"],
+  ["story", "stories"],
+  ["task", "tasks"],
+];
 
 export function doneListTest(names) {
   if (Array.isArray(names) && names.length) {
@@ -45,13 +60,6 @@ export function compareNumbers(a, b) {
   return 0;
 }
 
-// Acceptance criteria live in the card description as Given/When/Then bullets, one
-// "Given" per criterion, usually all on one line. A line only counts when When and Then
-// follow before the next Given, so a sentence that merely starts with "Given" doesn't.
-// Cards written during the window when the push skill made AC a real checklist keep
-// them there instead, so a checklist named "Acceptance Criteria" counts too. Without
-// that, every older story would read as having none.
-const GIVEN_START = /^[ \t]*(?:[-*][ \t]+)?\**Given\b/i;
 export function countCriteria(desc, checklists = []) {
   const inText = String(desc ?? "")
     .split(/^(?=[ \t]*(?:[-*][ \t]+)?\**Given\b)/im)
@@ -71,6 +79,9 @@ export function countOpenCriteria(checklists = []) {
     .reduce((n, c) => n + (c.checkItems ?? []).filter((i) => i.state === "incomplete").length, 0);
 }
 
+// floor, not round: 249 of 250 must not read as 100%. Nothing to do reads as 0%.
+export const percentOf = (done, total) => (total === 0 ? 0 : done === total ? 100 : Math.floor((100 * done) / total));
+
 // Build the tree from a flat card list.
 //   cards      Trello cards: id, name, shortLink, idList, due, dueComplete,
 //              dateLastActivity, desc, labels
@@ -79,9 +90,6 @@ export function countOpenCriteria(checklists = []) {
 // Duplicate numbers keep the first card and report the rest (auditCardHierarchy is the
 // tool that sorts those out). A card whose parent number is missing becomes a root of its
 // own and is flagged, so it still shows up in the totals instead of vanishing.
-// floor, not round: 249 of 250 must not read as 100%. Nothing to do reads as 0%.
-export const percentOf = (done, total) => (total === 0 ? 0 : done === total ? 100 : Math.floor((100 * done) / total));
-
 export function buildTree({ cards, lists = {}, checklists = {}, isDoneList = doneListTest() }) {
   const nodes = new Map();
   const duplicates = [];
@@ -156,13 +164,7 @@ export function buildTree({ cards, lists = {}, checklists = {}, isDoneList = don
 export function scopeTo(tree, number) {
   if (number === undefined || number === null || number === "") return tree.roots;
   const node = tree.nodes.get(String(number).trim());
-  if (!node) {
-    const epics = tree.roots.filter((r) => !r.orphan).map((r) => r.number);
-    throw new Error(
-      `No card numbered "${number}" on this board. ` +
-        (epics.length ? `Top-level numbers: ${epics.join(", ")}.` : "No numbered cards found."),
-    );
-  }
+  if (!node) throw unknownCardNumber(number, tree.roots.filter((r) => !r.orphan).map((r) => r.number));
   return [node];
 }
 
@@ -172,19 +174,13 @@ export const walk = (nodes, fn) => {
     walk(node.children, fn);
   }
 };
-const complete = (node) => node.done === node.total;
+export const complete = (node) => node.done === node.total;
 export const depthOf = (node) => node.number.split(".").length;
 
 // A story the status report calls ready for sign-off: every work item under it is done,
 // it has acceptance criteria, and none of its checklist criteria is left unticked.
 export const isSignOffReady = (node) =>
   depthOf(node) === 2 && node.criteria > 0 && complete(node) && node.criteriaOpen === 0;
-// What a card is, by depth. Used so a report scoped to a story calls it a story.
-const TIERS = [
-  ["epic", "epics"],
-  ["story", "stories"],
-  ["task", "tasks"],
-];
 export const tierOf = (node) => (TIERS[depthOf(node) - 1] ?? ["item", "items"])[0];
 export const plural = (tier, n) => (n === 1 ? tier : (TIERS.find(([one]) => one === tier)?.[1] ?? `${tier}s`));
 export const cap = (items) => ({ count: items.length, items: items.slice(0, SHOWN) });
@@ -277,118 +273,4 @@ export function buildReport(roots, { now = Date.now(), staleDays = 14 } = {}) {
     },
     openByList,
   };
-}
-
-export const bar = (percent) => {
-  const filled = Math.floor((percent * BAR_WIDTH) / 100);
-  return "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
-};
-// A card name as plain text inside markdown: its *, _, `, [ ] and < > are shown, not obeyed.
-export const mdText = (text) => String(text).replace(/([\\`*_[\]<>|])/g, "\\$1");
-export const more = (group) => (group.count > group.items.length ? ` (+${group.count - group.items.length} more)` : "");
-
-// The report a person would send a client: no ids, no JSON, plain sentences.
-export function renderReport(boardName, report, { now = Date.now() } = {}) {
-  const { progress, items, readyForSignOff, attention, openByList } = report;
-  const out = [`# Delivery status: ${boardName}`, `_${new Date(now).toISOString().slice(0, 10)}_`, ""];
-
-  const tier = items[0]?.tier ?? "epic";
-  const orphans = attention.missingParent.count;
-  const plusOrphans = orphans ? `, plus ${orphans} ${orphans === 1 ? "card" : "cards"} whose parent is missing` : "";
-  out.push(
-    `**${progress.percent}% complete.** ${progress.done} of ${progress.total} work items done across ${items.length} ${plural(tier, items.length)}${plusOrphans}.`,
-    "",
-    "## Progress",
-    "| | Progress | Done |",
-    "|---|---|---|",
-    ...items.map((e) => `| ${mdText(e.name)} | ${bar(e.percent)} ${e.percent}% | ${e.done} / ${e.total} |`),
-    "",
-  );
-
-  if (readyForSignOff.count) {
-    out.push(
-      "## Ready for sign-off",
-      ...readyForSignOff.items.map(
-        (s) => `- **${mdText(s.name)}**: every work item done, ${s.criteria} acceptance ${s.criteria === 1 ? "criterion" : "criteria"}`,
-      ),
-    );
-    if (readyForSignOff.count > readyForSignOff.items.length) out.push(`- …${more(readyForSignOff).trim()}`);
-    out.push("");
-  }
-
-  const lines = [];
-  const add = (label, group, describe) => {
-    if (!group.count) return;
-    lines.push(`- **${label} (${group.count}):** ${group.items.map(describe).join("; ")}${more(group)}`);
-  };
-  add("Blocked", attention.blocked, (c) => `${mdText(c.name)} [${mdText(c.list)}]`);
-  add("Overdue", attention.overdue, (c) => `${mdText(c.name)}, ${c.daysLate} ${c.daysLate === 1 ? "day" : "days"} late`);
-  add(`No activity for ${attention.stale.afterDays}+ days`, attention.stale, (c) => `${mdText(c.name)} [${mdText(c.list)}], idle ${c.daysIdle} days`);
-  add("Stories without acceptance criteria", attention.storiesWithoutCriteria, (c) => mdText(c.name));
-  add("Done but acceptance criteria not ticked", attention.storiesWithUnmetCriteria, (c) => `${mdText(c.name)}, ${c.open} open`);
-  add("Parent card missing", attention.missingParent, (c) => `${mdText(c.name)} (no ${c.expectedParent})`);
-  out.push("## Needs attention", ...(lines.length ? lines : ["Nothing needs attention."]), "");
-
-  const where = Object.entries(openByList).sort((a, b) => b[1] - a[1]);
-  if (where.length) out.push("## Where the open work sits", where.map(([list, n]) => `${mdText(list)}: ${n}`).join(" · "), "");
-
-  return out.join("\n").trimEnd();
-}
-
-// --- Board map -------------------------------------------------------------
-
-const within = (nodes, depth) => nodes.filter((n) => depthOf(n) <= depth);
-
-// Indented outline. Parents show the roll-up; work items show where they sit.
-export function renderOutline(roots, depth = 3) {
-  const text = (node) => {
-    if (node.children.length) return `${node.name}  ${bar(node.percent)} ${node.percent}% (${node.done}/${node.total})`;
-    return `${node.name}  ${node.isDone ? "✓" : "○"} ${node.list}${node.blocked ? " [blocked]" : ""}`;
-  };
-  const out = [];
-  const draw = (node, prefix, last, top) => {
-    out.push(top ? text(node) : `${prefix}${last ? "└─ " : "├─ "}${text(node)}`);
-    const kids = within(node.children, depth);
-    const next = top ? "" : prefix + (last ? "   " : "│  ");
-    kids.forEach((kid, i) => draw(kid, next, i === kids.length - 1, false));
-  };
-  // Roots are drawn whatever their own depth, so mapping one story (epic: "2.1") still
-  // shows that story; depth only limits what hangs below it.
-  roots.forEach((root) => draw(root, "", true, true));
-  return out.join("\n");
-}
-
-// Mermaid flowchart, coloured by progress: green when complete, amber when started.
-// Labels are quoted so card names with brackets or colons can't break the syntax; the
-// two characters that can break a quoted label ("#" starts an entity, `"` ends it)
-// are escaped, in that order so the entity's own "#" survives.
-export function renderMermaid(roots, depth = 3) {
-  const id = (node) => `n${node.number.replaceAll(".", "_")}`;
-  const label = (node) => {
-    const name = node.name.replace(/\s+/g, " ").trim();
-    const short = name.length > 48 ? `${name.slice(0, 47)}…` : name;
-    const safe = short.replaceAll("#", "#35;").replaceAll('"', "#quot;");
-    return node.children.length ? `${safe}<br/>${node.percent}%` : safe;
-  };
-  const style = (node) => (complete(node) ? "done" : node.done > 0 ? "partial" : "open");
-
-  const nodes = [];
-  const edges = [];
-  const visit = (node) => {
-    nodes.push(`  ${id(node)}["${label(node)}"]:::${style(node)}`);
-    for (const child of within(node.children, depth)) {
-      edges.push(`  ${id(node)} --> ${id(child)}`);
-      visit(child);
-    }
-  };
-  roots.forEach(visit);
-
-  return [
-    "flowchart TD",
-    ...nodes,
-    ...edges,
-    "  classDef done fill:#d1fae5,stroke:#059669,color:#064e3b",
-    "  classDef partial fill:#fef3c7,stroke:#d97706,color:#78350f",
-    "  classDef open fill:#f3f4f6,stroke:#9ca3af,color:#374151",
-  ].join("\n");
 }

@@ -30,9 +30,8 @@ import {
   indexFacts,
   isDeployedComment,
   isOneSentence,
-  renderOutcomeAudit,
 } from "./utils/outcome.mjs";
-import { buildDonePathAudit, renderDonePathAudit } from "./utils/donepath.mjs";
+import { buildDonePathAudit } from "./utils/donepath.mjs";
 import { checkPullRequests, parseGitHubPr, summarizeVerification } from "./utils/github.mjs";
 import {
   buildReport,
@@ -41,11 +40,13 @@ import {
   countCriteria,
   countOpenCriteria,
   doneListTest,
-  renderMermaid,
-  renderOutline,
-  renderReport,
   scopeTo,
 } from "./utils/rollup.mjs";
+import { renderDonePathAudit } from "./formatters/donepath.mjs";
+import { renderOutcomeAudit } from "./formatters/outcome.mjs";
+import { renderMermaid, renderOutline, renderReport } from "./formatters/rollup.mjs";
+import { GITHUB_UNVERIFIED, ToolError, githubFailure, invalidArgument } from "./errors.mjs";
+import { noteBlock, warning } from "./formatters/warnings.mjs";
 
 const graph = buildLinkGraph([
   {
@@ -1356,7 +1357,7 @@ assert.equal(sawSignal.aborted, false);
 
   assert.deepEqual(scopeTo(tree, "1").map((n) => n.number), ["1"]);
   assert.deepEqual(scopeTo(tree, undefined), tree.roots);
-  assert.throws(() => scopeTo(tree, "9"), /No card numbered "9" on this board\. Top-level numbers: 1, 2\./);
+  assert.throws(() => scopeTo(tree, "9"), { name: "ToolError", code: "unknown_card_number", hint: "Top-level numbers: 1, 2." });
 
   // The tools, over the real dispatch path with a mocked board.
   let mockCards = makeFixture(Date.now());
@@ -1412,9 +1413,9 @@ assert.equal(sawSignal.aborted, false);
   assert.equal(noneDone.data.progress.done, 0);
 
   for (const [args, pattern] of [
-    [{ epic: "9" }, /No card numbered "9" on this board\. Top-level numbers: 1, 2\./],
-    [{ format: "pdf" }, /format must be one of "markdown", "json", got "pdf"/],
-    [{ staleDays: 0 }, /staleDays must be a positive number/],
+    [{ epic: "9" }, /^unknown_card_number: No card numbered "9" on this board\. Hint: Top-level numbers: 1, 2\.$/],
+    [{ format: "pdf" }, /^invalid_argument: format must be one of "markdown", "json", got "pdf"\.$/],
+    [{ staleDays: 0 }, /^invalid_argument: staleDays must be a positive number, got 0\.$/],
     [{ doneLists: "Done" }, /doneLists for getStatusReport must be array, got string/],
   ]) {
     const bad = await call("getStatusReport", args);
@@ -1434,10 +1435,10 @@ assert.equal(sawSignal.aborted, false);
   assert.doesNotMatch(flow.data.map, /n1_1_1\[/, "depth 2 stops at stories");
   assert.doesNotMatch(flow.data.map, /n2\[/, "epic 1 only");
   for (const [args, pattern] of [
-    [{ format: "svg" }, /format must be one of "outline", "mermaid", got "svg"/],
-    [{ depth: 0 }, /depth must be a whole number of 1 or more/],
-    [{ depth: 1.5 }, /depth must be a whole number of 1 or more/],
-    [{ epic: "40" }, /No card numbered "40"/],
+    [{ format: "svg" }, /^invalid_argument: format must be one of "outline", "mermaid", got "svg"\.$/],
+    [{ depth: 0 }, /^invalid_argument: depth must be a whole number of 1 or more, got 0\.$/],
+    [{ depth: 1.5 }, /^invalid_argument: depth must be a whole number of 1 or more, got 1\.5\.$/],
+    [{ epic: "40" }, /^unknown_card_number: No card numbered "40"/],
   ]) {
     const bad = await call("getBoardMap", args);
     assert.equal(bad.isError, true, JSON.stringify(args));
@@ -1448,7 +1449,7 @@ assert.equal(sawSignal.aborted, false);
   mockCards = [{ id: "z", name: "Fix the printer", idList: "L1" }];
   const empty = await call("getStatusReport");
   assert.equal(empty.isError, true);
-  assert.match(empty.text, /No numbered cards on this board \(1 cards, none named like "EPIC 1\./);
+  assert.match(empty.text, /^no_numbered_cards: No numbered cards on this board \(1 cards, none named like "EPIC 1\..*Hint: .*auditCardHierarchy/);
 }
 
 // ---------------------------------------------------------------------------
@@ -1912,8 +1913,8 @@ assert.equal(sawSignal.aborted, false);
 
   // Arguments are checked before any request goes out.
   for (const [args, pattern] of [
-    [{ epic: "9" }, /No card numbered "9" on this board\. Top-level numbers: 1, 2\./],
-    [{ format: "pdf" }, /format must be one of "markdown", "json", got "pdf"/],
+    [{ epic: "9" }, /^unknown_card_number: No card numbered "9" on this board\. Hint: Top-level numbers: 1, 2\.$/],
+    [{ format: "pdf" }, /^invalid_argument: format must be one of "markdown", "json", got "pdf"\.$/],
     [{ doneLists: "Done" }, /doneLists for getOutcomeAudit must be array, got string/],
     [{ exemptLabels: "Design" }, /exemptLabels for getOutcomeAudit must be array, got string/],
     [{ exemptLabels: ["Design", 7] }, /exemptLabels for getOutcomeAudit must be an array of string, but index 1 is number/],
@@ -1928,7 +1929,7 @@ assert.equal(sawSignal.aborted, false);
   mockCards = [{ id: "z", name: "Fix the printer", idList: "L1" }];
   const empty = await call();
   assert.equal(empty.isError, true);
-  assert.match(empty.text, /No numbered cards on this board/);
+  assert.match(empty.text, /^no_numbered_cards: No numbered cards on this board/);
   mockCards = fixtureCards();
 
   // Pure layer: the same facts in, the same audit out, and the first of two cards that
@@ -2097,7 +2098,7 @@ assert.equal(sawSignal.aborted, false);
 
   const bad = await call({ burstSize: 1 });
   assert.equal(bad.isError, true);
-  assert.match(bad.text, /burstSize must be a whole number of 2 or more/);
+  assert.match(bad.text, /^invalid_argument: burstSize must be a whole number of 2 or more, got 1\.$/);
   // The schema states the whole-number rule itself, and a whole number still passes it.
   const fraction = await call({ burstSize: 5.5 });
   assert.equal(fraction.isError, true);
@@ -2189,7 +2190,7 @@ assert.equal(sawSignal.aborted, false);
   assert.equal(slow.results.get("acme/web#1").state, "unverified");
   assert.equal(slow.results.get("acme/web#1").reason, "could not reach GitHub");
 
-  await assert.rejects(() => checkPullRequests(prs, { token: "", fetchImpl: fakeFetch }), /token is required/);
+  await assert.rejects(() => checkPullRequests(prs, { token: "", fetchImpl: fakeFetch }), { name: "ToolError", code: "github_token_missing" });
 
   // A 200 that is not JSON (a proxy's HTML page) is an unexpected reply, not a network failure to retry.
   const html = await checkPullRequests([prs[0]], { token: TOKEN, fetchImpl: async () => new Response("<html>login</html>", { status: 200 }) });
@@ -2217,6 +2218,38 @@ assert.equal(sawSignal.aborted, false);
   assert.equal(/0 of 0 linked pull/.test(quiet), false);
   assert.match(quiet, /1 Done card links to a host other than GitHub/);
   assert.match(quiet, /Only Trello is read/);
+}
+
+// ---------------------------------------------------------------------------
+// errors.mjs and formatters/warnings.mjs: every failure and every note, each in one place.
+{
+  // A ToolError is an Error whose message carries its code and hint, which is all the model sees.
+  const err = invalidArgument("depth", "a whole number of 1 or more", 0);
+  assert.ok(err instanceof Error && err instanceof ToolError);
+  assert.equal(err.code, "invalid_argument");
+  assert.equal(err.message, "invalid_argument: depth must be a whole number of 1 or more, got 0.");
+  assert.equal(new ToolError("x_y", "Broke.", "Try again.").message, "x_y: Broke. Hint: Try again.");
+
+  // Each status GitHub can answer with maps to one reported failure, never to merged or not merged.
+  assert.deepEqual(
+    [401, 403, 404, 429, 500, 503, 302, 418].map(githubFailure),
+    [
+      GITHUB_UNVERIFIED.refused,
+      GITHUB_UNVERIFIED.refused,
+      GITHUB_UNVERIFIED.notFound,
+      GITHUB_UNVERIFIED.rateLimited,
+      GITHUB_UNVERIFIED.serverError,
+      GITHUB_UNVERIFIED.serverError,
+      GITHUB_UNVERIFIED.unexpectedReply,
+      GITHUB_UNVERIFIED.unexpectedReply,
+    ],
+  );
+  assert.ok(Object.values(GITHUB_UNVERIFIED).every((f) => f.state === "unverified" && Object.isFrozen(f)));
+
+  // A note is one sentence from the catalogue; no notes, no block.
+  assert.equal(warning("pathsTruncated", { read: 10 }), "the board has more card moves than were read (10), so some cards may look as if they skipped a stage.");
+  assert.equal(noteBlock([]), "");
+  assert.equal(noteBlock(["a.", "b."]), "\n\n_Note: a._\n_Note: b._");
 }
 
 // ---------------------------------------------------------------------------
