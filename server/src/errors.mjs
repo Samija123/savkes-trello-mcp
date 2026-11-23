@@ -7,6 +7,30 @@
 // better arguments. A GitHub check that cannot run, or fails, is not thrown: one dead link
 // must not fail a whole audit, so it comes back as a result that says why.
 
+// --- Reported, not thrown -----------------------------------------------------------
+
+// verifyPullRequests was asked for without a usable token: nothing is sent to GitHub.
+export const GITHUB_TOKEN_NOT_SET = Object.freeze({ enabled: false, reason: "GITHUB_TOKEN is not set" });
+
+// Why GitHub could not say whether a pull request was merged, and whether trying again could
+// help. None of these is ever read as merged or as not merged.
+export const GITHUB_UNVERIFIED = Object.freeze({
+  notFound: Object.freeze({ state: "unverified", reason: "not found or no access", category: "permission", retryable: false }),
+  refused: Object.freeze({ state: "unverified", reason: "refused by GitHub", category: "permission", retryable: false }),
+  rateLimited: Object.freeze({ state: "unverified", reason: "rate limited", category: "transient", retryable: true }),
+  serverError: Object.freeze({ state: "unverified", reason: "GitHub error", category: "transient", retryable: true }),
+  unexpectedReply: Object.freeze({ state: "unverified", reason: "unexpected reply", category: "validation", retryable: false }),
+  unreachable: Object.freeze({ state: "unverified", reason: "could not reach GitHub", category: "transient", retryable: true }),
+});
+
+// The statuses GitHub refuses with; any other reply but 200 is read by githubFailure below.
+const GITHUB_STATUS = Object.freeze({
+  401: GITHUB_UNVERIFIED.refused,
+  403: GITHUB_UNVERIFIED.refused,
+  404: GITHUB_UNVERIFIED.notFound,
+  429: GITHUB_UNVERIFIED.rateLimited,
+});
+
 // --- Thrown -------------------------------------------------------------------------
 
 // `code` is a stable snake_case name (tests match on it, not on the prose), `message` says
@@ -43,30 +67,7 @@ export const unknownCardNumber = (number, topLevel) =>
 export const githubTokenMissing = () =>
   new ToolError("github_token_missing", "A GitHub token is required to check pull requests.", "Set GITHUB_TOKEN to a read-only token.");
 
-// --- Reported, not thrown -----------------------------------------------------------
-
-// verifyPullRequests was asked for without a usable token: nothing is sent to GitHub.
-export const GITHUB_TOKEN_NOT_SET = Object.freeze({ enabled: false, reason: "GITHUB_TOKEN is not set" });
-
-// Why GitHub could not say whether a pull request was merged, and whether trying again could
-// help. None of these is ever read as merged or as not merged.
-const unverified = (reason, category, retryable) => Object.freeze({ state: "unverified", reason, category, retryable });
-
-export const GITHUB_UNVERIFIED = Object.freeze({
-  notFound: unverified("not found or no access", "permission", false),
-  refused: unverified("refused by GitHub", "permission", false),
-  rateLimited: unverified("rate limited", "transient", true),
-  serverError: unverified("GitHub error", "transient", true),
-  unexpectedReply: unverified("unexpected reply", "validation", false),
-  unreachable: unverified("could not reach GitHub", "transient", true),
-});
-
-const GITHUB_STATUS = Object.freeze({
-  401: GITHUB_UNVERIFIED.refused,
-  403: GITHUB_UNVERIFIED.refused,
-  404: GITHUB_UNVERIFIED.notFound,
-  429: GITHUB_UNVERIFIED.rateLimited,
-});
+// --- Reading a GitHub reply ---------------------------------------------------------
 
 // What a reply other than 200 means: a known refusal, a GitHub-side error, or a reply we
 // did not expect.

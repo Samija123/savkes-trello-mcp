@@ -69,8 +69,7 @@ async function checkOne({ owner, repo, number }, { token, fetchImpl, timeoutMs }
       body = await res.json();
     } catch {
       // Cut off by the timeout is a network problem; a body that is not JSON is not.
-      if (controller.signal.aborted) throw new Error("timed out");
-      return GITHUB_UNVERIFIED.unexpectedReply;
+      return controller.signal.aborted ? GITHUB_UNVERIFIED.unreachable : GITHUB_UNVERIFIED.unexpectedReply;
     }
     if (typeof body?.merged !== "boolean") return GITHUB_UNVERIFIED.unexpectedReply;
     if (body.merged) return { state: "merged" };
