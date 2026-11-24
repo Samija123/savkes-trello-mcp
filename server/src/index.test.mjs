@@ -220,11 +220,11 @@ assert.deepEqual(spreadPositions(2000, 1000, 2), [3024, 4048]);
 // tight on its own. Only <= 0 is unusable.
 assert.deepEqual(spreadPositions(1000, 1001, 3), [1000.25, 1000.5, 1000.75]);
 
-// 16 ported from mcp-trello + 9 from the wrapper + 9 added since + 4 report tools = 38. A name
-// collision between the halves would silently drop a tool, so the count is asserted
-// alongside the names. This is the only place the total is written down.
+// 16 ported from mcp-trello + 9 from the wrapper + 9 added since + 4 report tools + 2 Board
+// Health tools = 40. A name collision between the halves would silently drop a tool, so the
+// count is asserted alongside the names. This is the only place the total is written down.
 const list = await handle({ id: 1, method: "tools/list" });
-assert.equal(list.tools.length, 38);
+assert.equal(list.tools.length, 40);
 assert.deepEqual(
   list.tools.map((t) => t.name).sort(),
   [
@@ -233,6 +233,7 @@ assert.deepEqual(
     "addChecklistItem",
     "addComment",
     "addList",
+    "analyzeBoardHealth",
     "archiveCard",
     "archiveList",
     "attachCard",
@@ -245,6 +246,7 @@ assert.deepEqual(
     "findCards",
     "getBoardMap",
     "getBoardMembers",
+    "getBoardSummary",
     "getCard",
     "getCardChecklists",
     "getCardsByList",
