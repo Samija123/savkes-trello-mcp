@@ -11,7 +11,7 @@ Use it two ways:
   `@modelcontextprotocol/sdk`. Here you can read every byte that crosses the
   wire, from the `initialize` handshake to a tool result, in a single
   270-line file.
-- **As a real Trello integration for Claude Code.** It has 34 tools, 5
+- **As a real Trello integration for Claude Code.** It has 38 tools, 5
   prompts, 3 resources, and a draft → review → push workflow for creating
   numbered epic/story/task cards.
 
@@ -88,7 +88,7 @@ printf '%s\n' \
           │              │                  │
           │              ├──▶ utils/numbering.mjs   pure logic, no I/O
           ▼              ▼                  ▼
-        trello/client.mjs  ── the ONLY place that talks HTTP ──▶ api.trello.com
+        trello/client.mjs  ── the ONLY place that talks to Trello ──▶ api.trello.com
         auth header · rate limit · 429 retry · timeout · error redaction
 ```
 
@@ -98,8 +98,10 @@ Each layer has one job, and each job lives in one layer:
 |---|---|---|
 | `server/src/index.mjs` | Speak MCP: frame lines, route methods, validate args, wrap results | MCP, but not Trello |
 | `server/src/tools/*.mjs` | Define tools as plain objects `{ description, inputSchema, annotations, run }` | Trello endpoints, but not MCP framing |
-| `server/src/trello/client.mjs` | One `trello(method, path, params)` function for every HTTP call | HTTP, but not tools |
-| `server/src/utils/numbering.mjs` | Card-number parsing and placement maths | Nothing (pure functions) |
+| `server/src/trello/client.mjs` | One `trello(method, path, params)` function for every Trello call | HTTP, but not tools |
+| `server/src/utils/*.mjs` | Card-number parsing, placement maths, and the numbers behind the report tools | Nothing (pure functions), except `github.mjs`, which asks api.github.com whether a pull request was merged |
+| `server/src/formatters/*.mjs` | Turn those numbers into the markdown the report tools return, plus the notes they end with | Markdown, but not Trello |
+| `server/src/errors.mjs` | Every failure the report tools raise themselves: a `ToolError` with a stable `code` and a hint, and the GitHub check's results when it cannot answer | Nothing |
 | `server/src/resources.mjs`, `prompts.mjs` | The other two MCP primitives | — |
 | `server/src/index.test.mjs` | Protocol + tool tests with a mocked `fetch` | — |
 
@@ -228,7 +230,7 @@ start `claude` from the repo root, and `.mcp.json` does the rest.
 
 ## What's included
 
-### Tools (34)
+### Tools (38)
 
 | Group | Tools |
 |---|---|
@@ -236,6 +238,7 @@ start `claude` from the repo root, and `.mcp.json` does the rest.
 | **Write (additive)** | `addCard` `addList` `addComment` `addChecklist` `addChecklistItem` `moveCard` `unarchiveCard` `attachCard` `placeCards` |
 | **Write (destructive)** | `updateCard` `changeCardMembers` `archiveCard` `archiveList` `updateComment` `deleteComment` `updateChecklistItem` `deleteChecklist` `detachCard` |
 | **Hierarchy** | `listBoardCardLinks` `auditCardHierarchy` `nextCardNumbers` `repairCardHierarchy` (with `dryRun`) |
+| **Reports** | `getStatusReport` (client-ready progress report, rolled up from the card numbers) `getBoardMap` (the tree as an outline or Mermaid chart) `getOutcomeAudit` (how much of "Done" has evidence on the card: a second percentage next to percent in Done; stories that look ready for sign-off with none; how long each Done card without evidence has waited, oldest first; cards that break the team rule; with `verifyPullRequests` and a read-only `GITHUB_TOKEN`, it also asks GitHub whether the linked pull requests were merged) `getDonePathAudit` (how the cards in Done got there, from the card history: stages skipped, batches moved together, moves by the card's own member; counts and card names only) |
 
 The hierarchy tools show what domain tools look like beyond CRUD. Cards are
 numbered `EPIC 1` → `1.1` (story) → `1.1.2` (task), each card is attached to
