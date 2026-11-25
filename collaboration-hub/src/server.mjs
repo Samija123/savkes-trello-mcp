@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { splitTrelloCard } from './trello-split.mjs';
 import { createBoardCache } from './trello-board.mjs';
+import { LIMITS, checkLength, cleanText, cleanFieldList, fieldNameError, isValidRole, isValidStatus } from './utils/validators.mjs';
+import { redactSecrets } from './utils/formatters.mjs';
 import { WebSocketServer, WebSocket } from 'ws';
 
 // Read Trello credentials from the repo-root .env (the same file the MCP server uses).
@@ -16,9 +18,6 @@ if (process.env.COLLAB_SKIP_ENV_FILE !== 'true' && typeof process.loadEnvFile ==
 const PORT = Number(process.env.PORT || 8787);
 const BRIDGE_TOKEN = process.env.HUB_BRIDGE_TOKEN || '';
 const MAX_BODY = 2048;
-// Maximum length of every text the dashboard sends. Sent to the browser in each state
-// snapshot so the inputs' maxlength always matches what the server accepts.
-const LIMITS = Object.freeze({ name: 40, cardId: 80, field: 40, note: 200, work: 160, detail: 160 });
 const CLAIM_TTL_MS = Number(process.env.CLAIM_TTL_MS || 600_000); // 10 minutes default
 function authorized(given) {
   const a = Buffer.from(String(given || ''));
@@ -54,9 +53,6 @@ const MAX_VERSION_HISTORY = 20;
 const dependencies = new Map(); // cardId -> Set of prerequisite card IDs
 const statuses = new Map(); // cardId -> todo | doing | review | done
 
-// Roles a participant can join with. They label people in the dashboard; they do not
-// grant permissions (the hub is an advisory, local-only coordination tool).
-const VALID_ROLES = new Set(['admin', 'project_manager', 'developer', 'reviewer', 'viewer']);
 const board = createBoardCache();
 
 let sequence = 0;
@@ -72,8 +68,8 @@ const server = http.createServer(async (req, res) => {
         if (body.length > MAX_BODY) { res.writeHead(413); return res.end('Too large'); }
       }
       const msg = JSON.parse(body);
-      const tool = clean(msg.tool, 60);
-      const cardId = clean(msg.cardId, 80);
+      const tool = cleanText(msg.tool, LIMITS.tool);
+      const cardId = cleanText(msg.cardId, LIMITS.cardId);
       const status = msg.ok === true ? 'completed' : 'failed';
       if (!tool) { res.writeHead(400); return res.end('Tool required'); }
       publish('mcp-tool', `MCP ${tool} ${status}${cardId ? ' on ' + cardId : ''}`);
@@ -89,13 +85,14 @@ const server = http.createServer(async (req, res) => {
         if (body.length > MAX_BODY) { res.writeHead(413); return res.end('Too large'); }
       }
       const msg = JSON.parse(body);
-      const developerId = clean(msg.developerId, 80);
-      const cardId = clean(msg.cardId, 80);
-      const fields = Array.isArray(msg.fields) ? msg.fields.map((f) => clean(f, 40)).filter(Boolean) : [];
+      const developerId = cleanText(msg.developerId, LIMITS.developerId);
+      const cardId = cleanText(msg.cardId, LIMITS.cardId);
+      const fields = cleanFieldList(msg.fields);
       if (!developerId) { res.writeHead(400); return res.end('Developer ID required'); }
       if (!cardId) { res.writeHead(400); return res.end('Card ID required'); }
       if (fields.length === 0) { res.writeHead(400); return res.end('At least one field required'); }
-      if (fields.some((f) => f.includes(':'))) { res.writeHead(400); return res.end('Field names cannot contain ":"'); }
+      const badField = fields.map(fieldNameError).find(Boolean);
+      if (badField) { res.writeHead(400); return res.end(badField); }
 
       purgeExpired();
 
@@ -134,9 +131,9 @@ const server = http.createServer(async (req, res) => {
         if (body.length > MAX_BODY) { res.writeHead(413); return res.end('Too large'); }
       }
       const msg = JSON.parse(body);
-      const developerId = clean(msg.developerId, 80);
-      const cardId = clean(msg.cardId, 80);
-      const fields = Array.isArray(msg.fields) ? msg.fields.map((f) => clean(f, 40)).filter(Boolean) : [];
+      const developerId = cleanText(msg.developerId, LIMITS.developerId);
+      const cardId = cleanText(msg.cardId, LIMITS.cardId);
+      const fields = cleanFieldList(msg.fields);
       if (!developerId) { res.writeHead(400); return res.end('Developer ID required'); }
       if (!cardId) { res.writeHead(400); return res.end('Card ID required'); }
 
@@ -160,7 +157,7 @@ const server = http.createServer(async (req, res) => {
     // Resource IDs are namespaced ("cardId:abc") and sent URL-encoded, so decode the
     // path segment and match on the stored cardId rather than parsing the key.
     let cardId;
-    try { cardId = clean(decodeURIComponent(req.url.slice('/api/field-claims/'.length).split('?')[0]), 80); }
+    try { cardId = cleanText(decodeURIComponent(req.url.slice('/api/field-claims/'.length).split('?')[0]), LIMITS.cardId); }
     catch { res.writeHead(400); return res.end('Invalid card ID'); }
     purgeExpired();
     const claims = {};
@@ -178,8 +175,8 @@ const server = http.createServer(async (req, res) => {
         if (body.length > MAX_BODY) { res.writeHead(413); return res.end("Too large"); }
       }
       const msg = JSON.parse(body);
-      const developerId = clean(msg.developerId, 80);
-      const cardId = clean(msg.cardId, 80);
+      const developerId = cleanText(msg.developerId, LIMITS.developerId);
+      const cardId = cleanText(msg.cardId, LIMITS.cardId);
       if (!developerId) { res.writeHead(400); return res.end("Developer ID required"); }
       if (!cardId) { res.writeHead(400); return res.end("Card ID required"); }
       // Capture current field state as version snapshot
@@ -213,8 +210,8 @@ const server = http.createServer(async (req, res) => {
         if (body.length > MAX_BODY) { res.writeHead(413); return res.end("Too large"); }
       }
       const msg = JSON.parse(body);
-      const developerId = clean(msg.developerId, 80);
-      const cardId = clean(msg.cardId, 80);
+      const developerId = cleanText(msg.developerId, LIMITS.developerId);
+      const cardId = cleanText(msg.cardId, LIMITS.cardId);
       const targetVersion = msg.targetVersion;
       const proposedChanges = msg.proposedChanges;
       if (!developerId) { res.writeHead(400); return res.end("Developer ID required"); }
@@ -307,16 +304,6 @@ function publish(type, detail) {
   broadcast({ type: 'event', event });
   broadcast({ type: 'state', state: snapshot() });
 }
-function clean(value, max = 80) {
-  return typeof value === 'string' ? value.trim().slice(0, max) : '';
-}
-// Like clean(), but tells the caller when the text is longer than allowed instead of
-// silently cutting it. Returns { value } or { error }.
-function text(value, limit, label) {
-  const v = typeof value === 'string' ? value.trim() : '';
-  if (v.length > LIMITS[limit]) return { error: `${label} must be ${LIMITS[limit]} characters or fewer (got ${v.length})` };
-  return { value: v };
-}
 // With the real board loaded, only its cards can be used. Accepts a card ID or short link
 // and returns the full card ID. In demo mode (no Trello config) any ID is accepted.
 // Card name for messages ("Login page" instead of a 24-character ID) when the board is loaded.
@@ -339,11 +326,11 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { type: 'error', message: 'Invalid JSON' }); }
     const actor = participants.get(ws);
     if (msg.type === 'join') {
-      const checked = text(msg.name || msg.developerId, 'name', 'Name');
+      const checked = checkLength(msg.name || msg.developerId, 'name', 'Name');
       if (checked.error) return send(ws, { type: 'error', message: checked.error });
       const name = checked.value;
       const role = msg.role === undefined ? 'developer' : msg.role;
-      if (typeof role !== 'string' || !VALID_ROLES.has(role)) return send(ws, { type: 'error', message: 'Unknown role' });
+      if (!isValidRole(role)) return send(ws, { type: 'error', message: 'Unknown role' });
       if (!name) return send(ws, { type: 'error', message: 'Name required' });
       if ([...participants.entries()].some(([socket, person]) => socket !== ws && person.name === name)) return send(ws, { type: 'error', message: 'This name is already connected; choose a different name' });
       participants.set(ws, { name, role, cardId: null, joinedAt: new Date().toISOString() });
@@ -351,7 +338,7 @@ wss.on('connection', (ws) => {
       return;
     }
     if (!actor) return send(ws, { type: 'error', message: 'Join first' });
-    const typedCard = text(msg.cardId, 'cardId', 'Card ID');
+    const typedCard = checkLength(msg.cardId, 'cardId', 'Card ID');
     if (typedCard.error) return send(ws, { type: 'error', message: typedCard.error });
     const resolved = await resolveCard(typedCard.value);
     if (resolved.error) return send(ws, { type: 'error', message: resolved.error });
@@ -381,7 +368,7 @@ wss.on('connection', (ws) => {
       if (owner === actor.name) return send(ws, { type: 'error', message: 'You already own this card' });
       const existing = [...collaborationRequests.values()].find(r => r.cardId === cardId && r.requester === actor.name && r.status === 'pending');
       if (existing) return send(ws, { type: 'error', message: 'Request already pending' });
-      const note = text(msg.note, 'note', 'Message');
+      const note = checkLength(msg.note, 'note', 'Message');
       if (note.error) return send(ws, { type: 'error', message: note.error });
       const request = { id: ++requestSequence, cardId, owner, requester: actor.name, note: note.value, status: 'pending', createdAt: new Date().toISOString() };
       collaborationRequests.set(request.id, request);
@@ -392,8 +379,8 @@ wss.on('connection', (ws) => {
       if (request.owner !== actor.name || claims.get(request.cardId)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only the current card owner can respond' });
       if (!['approved', 'declined', 'split'].includes(msg.decision)) return send(ws, { type: 'error', message: 'Invalid decision' });
       if (msg.decision === 'split') {
-        const ownerCheck = text(msg.ownerWork, 'work', 'Your part');
-        const collabCheck = text(msg.collaboratorWork, 'work', 'Collaborator part');
+        const ownerCheck = checkLength(msg.ownerWork, 'work', 'Your part');
+        const collabCheck = checkLength(msg.collaboratorWork, 'work', 'Collaborator part');
         const tooLong = ownerCheck.error || collabCheck.error;
         if (tooLong) return send(ws, { type: 'error', message: tooLong });
         const ownerWork = ownerCheck.value;
@@ -432,7 +419,7 @@ wss.on('connection', (ws) => {
         publish('trello-card-split', `${actor.name} created a Trello split card for ${split.collaborator}`);
         send(ws, { type: 'trello-split-created', ...result });
       } catch (err) {
-        send(ws, { type: 'error', message: `Trello split failed: ${String(err.message).replace(/([?&](?:key|token)=)[^&\s]+/gi, '$1[redacted]')}` });
+        send(ws, { type: 'error', message: `Trello split failed: ${redactSecrets(err.message)}` });
       } finally { split.creating = false; }
     } else if (msg.type === 'release') {
       if (claims.get(cardId)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only claim owner can release' });
@@ -440,11 +427,12 @@ wss.on('connection', (ws) => {
       workSplits.delete(cardId);
       publish('released', `${actor.name} released ${label(cardId)}`);
     } else if (msg.type === 'claim-field') {
-      const fieldCheck = text(msg.field, 'field', 'Field');
+      const fieldCheck = checkLength(msg.field, 'field', 'Field');
       if (fieldCheck.error) return send(ws, { type: 'error', message: fieldCheck.error });
       const field = fieldCheck.value;
       if (!cardId || !field) return send(ws, { type: 'error', message: 'Card and field required' });
-      if (field.includes(':')) return send(ws, { type: 'error', message: 'Field names cannot contain ":"' });
+      const badField = fieldNameError(field);
+      if (badField) return send(ws, { type: 'error', message: badField });
       purgeExpired();
       const key = `${cardId}:${field}`;
       const existing = fieldClaims.get(key);
@@ -456,13 +444,13 @@ wss.on('connection', (ws) => {
         publish('field-claimed', `${actor.name} is editing ${key}`);
       }
     } else if (msg.type === 'release-field') {
-      const field = clean(msg.field, 40);
+      const field = cleanText(msg.field, LIMITS.field);
       const key = `${cardId}:${field}`;
       if (fieldClaims.get(key)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only field owner can release' });
       fieldClaims.delete(key);
       publish('field-released', `${actor.name} released ${key}`);
     } else if (msg.type === 'depends-on') {
-      const neededCard = await resolveCard(clean(msg.needs, LIMITS.cardId));
+      const neededCard = await resolveCard(cleanText(msg.needs, LIMITS.cardId));
       if (neededCard.error) return send(ws, { type: 'error', message: neededCard.error });
       const needs = neededCard.cardId;
       if (!cardId || !needs || cardId === needs) return send(ws, { type: 'error', message: 'Provide distinct card IDs' });
@@ -471,8 +459,8 @@ wss.on('connection', (ws) => {
       dependencies.set(cardId, current);
       publish('dependency', `${cardId} depends on ${needs}`);
     } else if (msg.type === 'status') {
-      const status = clean(msg.status, 12);
-      if (!cardId || !['todo', 'doing', 'review', 'done'].includes(status)) return send(ws, { type: 'error', message: 'Invalid card or status' });
+      const status = cleanText(msg.status, 12);
+      if (!cardId || !isValidStatus(status)) return send(ws, { type: 'error', message: 'Invalid card or status' });
       if (status === 'done') {
         const blockedBy = [...(dependencies.get(cardId) || [])].filter(id => statuses.get(id) !== 'done');
         if (blockedBy.length) return send(ws, { type: 'conflict', cardId, message: `${label(cardId)} is blocked by ${blockedBy.map(label).join(', ')}` });
@@ -480,7 +468,7 @@ wss.on('connection', (ws) => {
       statuses.set(cardId, status);
       publish('status', `${actor.name} moved ${cardId} to ${status}`);
     } else if (msg.type === 'activity') {
-      const detail = clean(msg.detail, LIMITS.detail);
+      const detail = cleanText(msg.detail, LIMITS.detail);
       if (detail) publish('activity', `${actor.name}: ${detail}`);
     } else {
       send(ws, { type: 'error', message: 'Unknown message type' });

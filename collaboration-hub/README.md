@@ -8,7 +8,7 @@ The hub reads `TRELLO_API_KEY`, `TRELLO_TOKEN` and `TRELLO_BOARD_ID` from the re
 
 ## Input limits
 
-Every text field has one limit, defined once in `LIMITS` at the top of `src/server.mjs`: name 40, card ID 80, field 40, collaboration message 200, split descriptions 160 characters. The limits are sent to the browser with each state update and applied as `maxlength`, and the server rejects longer text with a clear message instead of cutting it silently.
+Every text field has one limit, defined once in `LIMITS` in `src/utils/validators.mjs` (with the other input checks: allowed roles, card statuses, field names; text helpers live in `src/utils/formatters.mjs`): name 40, card ID 80, field 40, collaboration message 200, split descriptions 160 characters. The limits are sent to the browser with each state update and applied as `maxlength`, and the server rejects longer text with a clear message instead of cutting it silently.
 
 ## Run locally (Node.js 20+)
 

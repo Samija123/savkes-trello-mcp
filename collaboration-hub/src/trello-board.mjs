@@ -5,6 +5,8 @@
  * only accepts claims on cards that exist on that board. Without them the hub runs in
  * demo mode and accepts any typed card ID.
  */
+import { redactSecrets as redact } from './utils/formatters.mjs';
+
 const API = 'https://api.trello.com/1';
 const CACHE_MS = 30_000;
 
@@ -12,7 +14,6 @@ export function boardConfigured(env = process.env) {
   return Boolean(env.TRELLO_API_KEY && env.TRELLO_TOKEN && env.TRELLO_BOARD_ID);
 }
 
-const redact = (text) => String(text).replace(/([?&](?:key|token)=)[^&\s]+/gi, '$1[redacted]');
 
 export async function fetchBoard({ key, token, boardId, fetchImpl = fetch }) {
   const auth = new URLSearchParams({ key, token });
