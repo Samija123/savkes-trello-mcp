@@ -1,6 +1,14 @@
-# Phase 1 — Trello MCP Live Collaboration Hub
+# Trello MCP Live Collaboration Hub
 
-A **local, optional** collaboration service added to the original `savkes-trello-mcp` repository. This is a working Phase 1 prototype, not a production multi-user deployment.
+A **local, optional** collaboration service added to the original `savkes-trello-mcp` repository. It is a working prototype, not a production multi-user deployment.
+
+## Real Trello board
+
+The hub reads `TRELLO_API_KEY`, `TRELLO_TOKEN` and `TRELLO_BOARD_ID` from the repo-root `.env` (the same file the MCP server uses). With them set, the dashboard shows the board name and a card picker grouped by list with the board's real open cards, and the hub only accepts claims, dependencies and collaboration requests on cards that are on that board (card ID or short link). Without them it runs in **demo mode** and accepts any typed ID such as `TRELLO-42`. `GET /api/board` returns what the hub sees (`?refresh=1` skips the 30-second cache).
+
+## Input limits
+
+Every text field has one limit, defined once in `LIMITS` at the top of `src/server.mjs`: name 40, card ID 80, field 40, collaboration message 200, split descriptions 160 characters. The limits are sent to the browser with each state update and applied as `maxlength`, and the server rejects longer text with a clear message instead of cutting it silently.
 
 ## Run locally (Node.js 20+)
 
@@ -12,7 +20,7 @@ npm install
 npm start
 ```
 
-Open **http://127.0.0.1:8787** in two separate browser tabs. Connect with different names, focus on a card, and try to claim the same card or same field. Add a dependency, change statuses, and observe the live feed. `npm run demo` simulates two developers. `npm test` checks the optional bridge behavior.
+Open **http://127.0.0.1:8787** in two separate browser tabs. Connect with different names, pick a card, and try to claim the same card or same field. Add a dependency, change statuses, and observe the live feed. `npm run demo` simulates two developers. `npm test` checks the optional bridge behavior.
 
 ## Optional connection to the existing MCP server
 
@@ -48,9 +56,9 @@ For local MCP smoke tests: `cd server && npm test && npm run smoke` (the origina
 
 ## Not implemented yet
 
-- Authenticated team accounts, roles, permissions, assignments, approval requests, notifications
+- Authenticated team accounts, permissions, assignments, notifications (roles are display labels only)
 - Durable persistence, robust reconnect identity, claim expiration, multi-instance hosting
-- Trello webhooks, real-time Trello edits, GitHub file overlap detection, AI merges
+- Trello webhooks (the board list refreshes every 30 s or on *Refresh board*), real-time Trello edits, GitHub file overlap detection, AI merges
 - Actual merge prevention: warnings are advisory and do not lock GitHub or Trello
 
 **Security:** Do not expose the hub on a public interface. Browser WebSocket clients are unauthenticated in this local demo. The bridge token protects only the MCP event endpoint. For a real team-hosted deployment, add authentication, TLS, authorization, durable storage, and abuse limits first.

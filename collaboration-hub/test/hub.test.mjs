@@ -20,7 +20,7 @@ before(async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'hub-'));
   proc = spawn(process.execPath, [path.resolve('src/server.mjs')], {
     cwd: dir,
-    env: { ...process.env, PORT: String(PORT), HUB_BRIDGE_TOKEN: TOKEN, CLAIM_TTL_MS: '300', COLLAB_DB_PATH: path.join(dir, 'p4.json') },
+    env: { ...process.env, PORT: String(PORT), HUB_BRIDGE_TOKEN: TOKEN, CLAIM_TTL_MS: '300', COLLAB_SKIP_ENV_FILE: 'true' },
     stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
@@ -101,4 +101,46 @@ test('/ws validates join role', async () => {
   await new Promise((r) => setTimeout(r, 150));
   assert.ok(msgs.some((m) => m.type === 'error' && /role/i.test(m.message)));
   ws.close();
+});
+
+async function joined(name) {
+  const { ws } = await connect({ Origin: BASE });
+  const msgs = [];
+  ws.on('message', (d) => msgs.push(JSON.parse(d)));
+  ws.send(JSON.stringify({ type: 'join', name }));
+  await new Promise((r) => setTimeout(r, 100));
+  return { ws, msgs, send: (m) => ws.send(JSON.stringify(m)) };
+}
+const wait = (ms = 120) => new Promise((r) => setTimeout(r, ms));
+
+test('over-long names are rejected with the limit, and limits are sent to the dashboard', async () => {
+  const { ws, msgs } = await joined('x'.repeat(41));
+  assert.ok(msgs.some((m) => m.type === 'error' && /40 characters or fewer/.test(m.message)));
+  const state = msgs.find((m) => m.type === 'state').state;
+  assert.equal(state.limits.name, 40);
+  ws.close();
+});
+
+test('collaboration request → split works end to end over /ws', async () => {
+  const owner = await joined('Owner');
+  const helper = await joined('Helper');
+  owner.send({ type: 'claim', cardId: 'CARD-1' });
+  await wait();
+  helper.send({ type: 'request-collaboration', cardId: 'CARD-1', note: 'I can take the tests' });
+  await wait();
+  const state = () => owner.msgs.filter((m) => m.type === 'state').at(-1).state;
+  const request = state().collaborationRequests.find((r) => r.cardId === 'CARD-1');
+  assert.equal(request.requester, 'Helper');
+  assert.equal(request.note, 'I can take the tests');
+  owner.send({ type: 'respond-collaboration', requestId: request.id, decision: 'split', ownerWork: 'API', collaboratorWork: 'Tests' });
+  await wait();
+  const split = state().workSplits.find((s) => s.cardId === 'CARD-1');
+  assert.deepEqual([split.owner, split.collaborator, split.ownerWork, split.collaboratorWork], ['Owner', 'Helper', 'API', 'Tests']);
+  owner.ws.close(); helper.ws.close();
+});
+
+test('/api/board reports demo mode when Trello is not configured', async () => {
+  const body = await (await fetch(BASE + '/api/board')).json();
+  // The test environment may have real Trello vars exported; only assert demo mode when it doesn't.
+  if (!process.env.TRELLO_API_KEY) assert.equal(body.mode, 'demo');
 });

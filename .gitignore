@@ -18,8 +18,6 @@ server/phase3_verify.mjs
 *.db-*
 *.sqlite
 *.sqlite3
-collaboration-hub-phase4.json
-**/collaboration-hub-phase4.json
 
 # Local backups
 collaboration-backup/

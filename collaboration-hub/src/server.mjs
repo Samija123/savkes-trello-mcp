@@ -1,15 +1,24 @@
-import { installPhase4 } from './phase4.mjs';
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { splitTrelloCard } from './trello-split.mjs';
+import { createBoardCache } from './trello-board.mjs';
 import { WebSocketServer, WebSocket } from 'ws';
+
+// Read Trello credentials from the repo-root .env (the same file the MCP server uses).
+// Variables already set in the environment win. Tests set COLLAB_SKIP_ENV_FILE=true.
+if (process.env.COLLAB_SKIP_ENV_FILE !== 'true' && typeof process.loadEnvFile === 'function') {
+  try { process.loadEnvFile(fileURLToPath(new URL('../../.env', import.meta.url))); } catch { /* no .env: demo mode */ }
+}
 
 const PORT = Number(process.env.PORT || 8787);
 const BRIDGE_TOKEN = process.env.HUB_BRIDGE_TOKEN || '';
 const MAX_BODY = 2048;
+// Maximum length of every text the dashboard sends. Sent to the browser in each state
+// snapshot so the inputs' maxlength always matches what the server accepts.
+const LIMITS = Object.freeze({ name: 40, cardId: 80, field: 40, note: 200, work: 160, detail: 160 });
 const CLAIM_TTL_MS = Number(process.env.CLAIM_TTL_MS || 600_000); // 10 minutes default
 function authorized(given) {
   const a = Buffer.from(String(given || ''));
@@ -45,20 +54,10 @@ const MAX_VERSION_HISTORY = 20;
 const dependencies = new Map(); // cardId -> Set of prerequisite card IDs
 const statuses = new Map(); // cardId -> todo | doing | review | done
 
-const roles = new Map(); // userId -> { role, joinedAt }
-const rolePermissions = new Map();
-roles.set("admin", { level: 10, can: ["manage_members", "create_workspaces", "view_audit", "manage_projects"] });
-roles.set("project_manager", { level: 8, can: ["view_audit", "manage_projects", "assign_tasks", "approve_changes"] });
-roles.set("developer", { level: 5, can: ["view_cards", "claim_tasks", "make_changes", "add_comments"] });
-roles.set("reviewer", { level: 3, can: ["view_cards", "add_comments", "review_changes"] });
-roles.set("viewer", { level: 1, can: ["view_cards", "read_only"] });
-
-function hasPermission(userId, requiredPermission) {
-  const userRole = roles.get(userId);
-  if (!userRole) return false;
-  const permList = rolePermissions.get(userId) || userRole.can;
-  return permList.includes(requiredPermission);
-}
+// Roles a participant can join with. They label people in the dashboard; they do not
+// grant permissions (the hub is an advisory, local-only coordination tool).
+const VALID_ROLES = new Set(['admin', 'project_manager', 'developer', 'reviewer', 'viewer']);
+const board = createBoardCache();
 
 let sequence = 0;
 
@@ -252,6 +251,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.url === '/api/state') return json(res, snapshot());
+  if (req.url === '/api/board' || req.url === '/api/board?refresh=1') {
+    const result = await board.get({ force: req.url.endsWith('refresh=1') });
+    return json(res, result);
+  }
   if (req.url !== '/' && req.url !== '/index.html') { res.writeHead(404); return res.end('Not found'); }
   try {
     const html = await readFile(path.join(root, 'index.html'));
@@ -291,7 +294,8 @@ function snapshot() {
     fieldClaims: [...fieldClaims.entries()].map(([key, claim]) => ({ key, ...claim })),
     dependencies: [...dependencies.entries()].map(([cardId, needs]) => ({ cardId, needs: [...needs] })),
     statuses: [...statuses.entries()].map(([cardId, status]) => ({ cardId, status })),
-    events: events.slice(-40)
+    events: events.slice(-40),
+    limits: LIMITS
   };
 }
 function send(ws, value) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); }
@@ -306,6 +310,23 @@ function publish(type, detail) {
 function clean(value, max = 80) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
+// Like clean(), but tells the caller when the text is longer than allowed instead of
+// silently cutting it. Returns { value } or { error }.
+function text(value, limit, label) {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (v.length > LIMITS[limit]) return { error: `${label} must be ${LIMITS[limit]} characters or fewer (got ${v.length})` };
+  return { value: v };
+}
+// With the real board loaded, only its cards can be used. Accepts a card ID or short link
+// and returns the full card ID. In demo mode (no Trello config) any ID is accepted.
+async function resolveCard(cardId) {
+  if (!cardId || !board.configured()) return { cardId };
+  await board.get();
+  const card = board.findCard(cardId);
+  if (card === null) return { cardId }; // board could not be loaded; don't block the team
+  if (!card) return { error: `Card ${cardId} is not an open card on the Trello board` };
+  return { cardId: card.id, card };
+}
 wss.on('connection', (ws) => {
   send(ws, { type: 'state', state: snapshot() });
   ws.on('message', async (raw) => {
@@ -313,9 +334,11 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { type: 'error', message: 'Invalid JSON' }); }
     const actor = participants.get(ws);
     if (msg.type === 'join') {
-      const name = clean(msg.name || msg.developerId, 40);
+      const checked = text(msg.name || msg.developerId, 'name', 'Name');
+      if (checked.error) return send(ws, { type: 'error', message: checked.error });
+      const name = checked.value;
       const role = msg.role === undefined ? 'developer' : msg.role;
-      if (typeof role !== 'string' || !roles.has(role)) return send(ws, { type: 'error', message: 'Unknown role' });
+      if (typeof role !== 'string' || !VALID_ROLES.has(role)) return send(ws, { type: 'error', message: 'Unknown role' });
       if (!name) return send(ws, { type: 'error', message: 'Name required' });
       if ([...participants.entries()].some(([socket, person]) => socket !== ws && person.name === name)) return send(ws, { type: 'error', message: 'This name is already connected; choose a different name' });
       participants.set(ws, { name, role, cardId: null, joinedAt: new Date().toISOString() });
@@ -323,7 +346,11 @@ wss.on('connection', (ws) => {
       return;
     }
     if (!actor) return send(ws, { type: 'error', message: 'Join first' });
-    const cardId = clean(msg.cardId);
+    const typedCard = text(msg.cardId, 'cardId', 'Card ID');
+    if (typedCard.error) return send(ws, { type: 'error', message: typedCard.error });
+    const resolved = await resolveCard(typedCard.value);
+    if (resolved.error) return send(ws, { type: 'error', message: resolved.error });
+    const cardId = resolved.cardId;
     if (msg.type === 'focus') {
       actor.cardId = cardId || null;
       publish('focus', `${actor.name} is viewing ${cardId || 'no card'}`);
@@ -346,7 +373,9 @@ wss.on('connection', (ws) => {
       if (owner === actor.name) return send(ws, { type: 'error', message: 'You already own this card' });
       const existing = [...collaborationRequests.values()].find(r => r.cardId === cardId && r.requester === actor.name && r.status === 'pending');
       if (existing) return send(ws, { type: 'error', message: 'Request already pending' });
-      const request = { id: ++requestSequence, cardId, owner, requester: actor.name, note: clean(msg.note, 200), status: 'pending', createdAt: new Date().toISOString() };
+      const note = text(msg.note, 'note', 'Message');
+      if (note.error) return send(ws, { type: 'error', message: note.error });
+      const request = { id: ++requestSequence, cardId, owner, requester: actor.name, note: note.value, status: 'pending', createdAt: new Date().toISOString() };
       collaborationRequests.set(request.id, request);
       publish('collaboration-request', `${actor.name} requested to collaborate with ${owner} on ${cardId}`);
     } else if (msg.type === 'respond-collaboration') {
@@ -355,8 +384,12 @@ wss.on('connection', (ws) => {
       if (request.owner !== actor.name || claims.get(request.cardId)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only the current card owner can respond' });
       if (!['approved', 'declined', 'split'].includes(msg.decision)) return send(ws, { type: 'error', message: 'Invalid decision' });
       if (msg.decision === 'split') {
-        const ownerWork = clean(msg.ownerWork, 160);
-        const collaboratorWork = clean(msg.collaboratorWork, 160);
+        const ownerCheck = text(msg.ownerWork, 'work', 'Your part');
+        const collabCheck = text(msg.collaboratorWork, 'work', 'Collaborator part');
+        const tooLong = ownerCheck.error || collabCheck.error;
+        if (tooLong) return send(ws, { type: 'error', message: tooLong });
+        const ownerWork = ownerCheck.value;
+        const collaboratorWork = collabCheck.value;
         if (!ownerWork || !collaboratorWork) return send(ws, { type: 'error', message: 'Describe both parts of the work before splitting' });
         if (workSplits.has(request.cardId)) return send(ws, { type: 'error', message: 'This card already has a work split. Resolve it before splitting again' });
         workSplits.set(request.cardId, {
@@ -398,8 +431,10 @@ wss.on('connection', (ws) => {
       claims.delete(cardId);
       workSplits.delete(cardId);
       publish('released', `${actor.name} released ${cardId}`);
-     } else if (msg.type === 'claim-field') {
-      const field = clean(msg.field, 40);
+    } else if (msg.type === 'claim-field') {
+      const fieldCheck = text(msg.field, 'field', 'Field');
+      if (fieldCheck.error) return send(ws, { type: 'error', message: fieldCheck.error });
+      const field = fieldCheck.value;
       if (!cardId || !field) return send(ws, { type: 'error', message: 'Card and field required' });
       if (field.includes(':')) return send(ws, { type: 'error', message: 'Field names cannot contain ":"' });
       purgeExpired();
@@ -419,7 +454,9 @@ wss.on('connection', (ws) => {
       fieldClaims.delete(key);
       publish('field-released', `${actor.name} released ${key}`);
     } else if (msg.type === 'depends-on') {
-      const needs = clean(msg.needs);
+      const neededCard = await resolveCard(clean(msg.needs, LIMITS.cardId));
+      if (neededCard.error) return send(ws, { type: 'error', message: neededCard.error });
+      const needs = neededCard.cardId;
       if (!cardId || !needs || cardId === needs) return send(ws, { type: 'error', message: 'Provide distinct card IDs' });
       const current = dependencies.get(cardId) || new Set();
       current.add(needs);
@@ -435,7 +472,7 @@ wss.on('connection', (ws) => {
       statuses.set(cardId, status);
       publish('status', `${actor.name} moved ${cardId} to ${status}`);
     } else if (msg.type === 'activity') {
-      const detail = clean(msg.detail, 160);
+      const detail = clean(msg.detail, LIMITS.detail);
       if (detail) publish('activity', `${actor.name}: ${detail}`);
     } else {
       send(ws, { type: 'error', message: 'Unknown message type' });
@@ -449,5 +486,4 @@ wss.on('connection', (ws) => {
     publish('left', `${actor.name} disconnected (claims retained)`);
   });
 });
-installPhase4(server);
 server.listen(PORT, HOST, () => console.log(`Hub running at http://${HOST}:${PORT}`));
