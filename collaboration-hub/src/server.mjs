@@ -319,6 +319,11 @@ function text(value, limit, label) {
 }
 // With the real board loaded, only its cards can be used. Accepts a card ID or short link
 // and returns the full card ID. In demo mode (no Trello config) any ID is accepted.
+// Card name for messages ("Login page" instead of a 24-character ID) when the board is loaded.
+function label(cardId) {
+  const card = cardId && board.findCard(cardId);
+  return card ? `"${card.name}"` : cardId;
+}
 async function resolveCard(cardId) {
   if (!cardId || !board.configured()) return { cardId };
   await board.get();
@@ -353,17 +358,20 @@ wss.on('connection', (ws) => {
     const cardId = resolved.cardId;
     if (msg.type === 'focus') {
       actor.cardId = cardId || null;
-      publish('focus', `${actor.name} is viewing ${cardId || 'no card'}`);
+      publish('focus', `${actor.name} is viewing ${cardId ? label(cardId) : 'no card'}`);
     } else if (msg.type === 'claim') {
       if (!cardId) return send(ws, { type: 'error', message: 'Card ID required' });
       const current = claims.get(cardId);
-      if (current && current.owner !== actor.name) {
-        send(ws, { type: 'conflict', cardId, owner: current.owner, message: `Card ${cardId} is already claimed by ${current.owner}` });
-        publish('overlap-warning', `${actor.name} tried to claim ${cardId}, owned by ${current.owner}`);
+      if (current && current.owner === actor.name) {
+        return send(ws, { type: 'info', message: `You already claimed ${label(cardId)}` });
+      }
+      if (current) {
+        send(ws, { type: 'conflict', cardId, owner: current.owner, message: `${label(cardId)} is already claimed by ${current.owner}` });
+        publish('overlap-warning', `${actor.name} tried to claim ${label(cardId)}, owned by ${current.owner}`);
       } else {
         claims.set(cardId, { owner: actor.name, claimedAt: new Date().toISOString() });
         actor.cardId = cardId;
-        publish('claimed', `${actor.name} claimed ${cardId}`);
+        publish('claimed', `${actor.name} claimed ${label(cardId)}`);
       }
 
     } else if (msg.type === 'request-collaboration') {
@@ -430,7 +438,7 @@ wss.on('connection', (ws) => {
       if (claims.get(cardId)?.owner !== actor.name) return send(ws, { type: 'error', message: 'Only claim owner can release' });
       claims.delete(cardId);
       workSplits.delete(cardId);
-      publish('released', `${actor.name} released ${cardId}`);
+      publish('released', `${actor.name} released ${label(cardId)}`);
     } else if (msg.type === 'claim-field') {
       const fieldCheck = text(msg.field, 'field', 'Field');
       if (fieldCheck.error) return send(ws, { type: 'error', message: fieldCheck.error });
@@ -441,7 +449,7 @@ wss.on('connection', (ws) => {
       const key = `${cardId}:${field}`;
       const existing = fieldClaims.get(key);
       if (existing && existing.owner !== actor.name) {
-        send(ws, { type: 'conflict', cardId, field, owner: existing.owner, message: `${key} is being edited by ${existing.owner}` });
+        send(ws, { type: 'conflict', cardId, field, owner: existing.owner, message: `${field} on ${label(cardId)} is being edited by ${existing.owner}` });
         publish('field-overlap', `${actor.name} overlaps ${existing.owner} on ${key}`);
       } else {
         fieldClaims.set(key, { owner: actor.name, claimedAt: new Date().toISOString(), cardId, field });
@@ -467,7 +475,7 @@ wss.on('connection', (ws) => {
       if (!cardId || !['todo', 'doing', 'review', 'done'].includes(status)) return send(ws, { type: 'error', message: 'Invalid card or status' });
       if (status === 'done') {
         const blockedBy = [...(dependencies.get(cardId) || [])].filter(id => statuses.get(id) !== 'done');
-        if (blockedBy.length) return send(ws, { type: 'conflict', cardId, message: `${cardId} is blocked by ${blockedBy.join(', ')}` });
+        if (blockedBy.length) return send(ws, { type: 'conflict', cardId, message: `${label(cardId)} is blocked by ${blockedBy.map(label).join(', ')}` });
       }
       statuses.set(cardId, status);
       publish('status', `${actor.name} moved ${cardId} to ${status}`);

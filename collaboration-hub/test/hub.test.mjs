@@ -104,9 +104,11 @@ test('/ws validates join role', async () => {
 });
 
 async function joined(name) {
-  const { ws } = await connect({ Origin: BASE });
+  // Listen before the socket opens: the hub sends its first state message immediately.
   const msgs = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { Origin: BASE } });
   ws.on('message', (d) => msgs.push(JSON.parse(d)));
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   ws.send(JSON.stringify({ type: 'join', name }));
   await new Promise((r) => setTimeout(r, 100));
   return { ws, msgs, send: (m) => ws.send(JSON.stringify(m)) };
@@ -143,4 +145,15 @@ test('/api/board reports demo mode when Trello is not configured', async () => {
   const body = await (await fetch(BASE + '/api/board')).json();
   // The test environment may have real Trello vars exported; only assert demo mode when it doesn't.
   if (!process.env.TRELLO_API_KEY) assert.equal(body.mode, 'demo');
+});
+
+test('claiming your own card again is not reported as a conflict', async () => {
+  const me = await joined('Solo');
+  me.send({ type: 'claim', cardId: 'CARD-SELF' });
+  await wait();
+  me.send({ type: 'claim', cardId: 'CARD-SELF' });
+  await wait();
+  assert.ok(me.msgs.some((m) => m.type === 'info' && /already claimed/.test(m.message)));
+  assert.ok(!me.msgs.some((m) => m.type === 'conflict'));
+  me.ws.close();
 });
